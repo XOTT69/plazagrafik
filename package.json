@@ -5,8 +5,5 @@
   },
   "devDependencies": {
     "wrangler": "latest"
-  },
-  "dependencies": {
-    "itty-router": "^5.0.22"
   }
 }
