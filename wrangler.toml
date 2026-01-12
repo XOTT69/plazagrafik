@@ -1,1 +1,10 @@
+name = "plazagrafik"
+main = "src/index.js"
+compatibility_date = "2026-01-12"
+
+[env.production]
+# GitHub Actions автоматично використовуватиме production
+
+[[triggers]]
+crons = ["0 * * * *"]  # опціонально: перевірка щогодини
 
