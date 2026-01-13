@@ -1,38 +1,36 @@
 export default {
   async fetch(request, env) {
-    if (request.method !== "POST") return new Response("OK");
+    console.log("REQUEST RECEIVED");
+
+    if (request.method !== "POST") {
+      console.log("Not POST");
+      return new Response("OK");
+    }
 
     const update = await request.json();
+    console.log("UPDATE:", JSON.stringify(update));
+
     const msg = update.message || update.channel_post;
-    if (!msg) return new Response("OK");
+    if (!msg) {
+      console.log("No message in update");
+      return new Response("OK");
+    }
 
     const text = msg.text || msg.caption || "";
-    if (!text) return new Response("OK");
+    console.log("TEXT:", text);
 
-    const payload = build22Message(text);
-    if (!payload) return new Response("OK");
+    // ТЕСТОВЕ повідомлення
+    await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: env.CHANNEL_ID,
+        text: "ТЕСТ: " + text
+      })
+    });
 
-    await sendToTelegram(env.BOT_TOKEN, env.CHANNEL_ID, payload);
+    console.log("Message sent to channel");
+
     return new Response("OK");
   }
 };
-
-async function sendToTelegram(token, chatId, text) {
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      disable_web_page_preview: true
-    })
-  });
-}
-
-function build22Message(text) {
-  const lines = text.split("\n");
-  const header = lines.find(l => l.trim());
-  const line22 = lines.find(l => l.includes("2.2") && l.includes("підгруп"));
-  if (!header || !line22) return null;
-  return header === line22 ? line22 : `${header}\n${line22}`;
-}
