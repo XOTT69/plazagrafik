@@ -60,7 +60,7 @@ function parseDarkHours(text) {
 function build22Message(text) {
   const lines = text.split("\n");
 
-  // Шапка: перший непорожній рядок
+  // Перший непорожній рядок — шапка
   let header = null;
   for (const line of lines) {
     if (line.trim()) {
@@ -70,7 +70,7 @@ function build22Message(text) {
   }
   if (!header) return null;
 
-  // ===== Формат 1: "Підгрупа 2.2 ..." =====
+  // ===== Формат 1: блок "Підгрупа 2.2 ..." =====
   let start22 = -1;
   for (let i = 0; i < lines.length; i++) {
     if (lines[i].includes("Підгрупа") && lines[i].includes("2.2")) {
@@ -101,7 +101,7 @@ function build22Message(text) {
     return parsedText;
   }
 
-  // ===== Формат 2: "2.2 підгрупа" в одному рядку =====
+  // ===== Формат 2: один рядок "2.2 підгрупа" =====
   let line22 = null;
   for (const line of lines) {
     if (line.includes("2.2") && line.toLowerCase().includes("підгруп")) {
@@ -135,7 +135,7 @@ export default {
 
     const payload = build22Message(text);
     if (!payload) {
-      console.log("No payload generated for text:", text);
+      console.log("No payload generated for:", text);
       return new Response("OK");
     }
 
@@ -150,7 +150,7 @@ export default {
     });
 
     const data = await resp.text();
-    console.log("Telegram sendMessage response:", data);
+    console.log("Telegram response:", data);
 
     return new Response("OK");
   }
