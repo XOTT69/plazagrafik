@@ -60,7 +60,7 @@ function parseDarkHours(text) {
 function build22Message(text) {
   const lines = text.split("\n");
 
-  // Перший непорожній рядок — шапка
+  // Шапка
   let header = null;
   for (const line of lines) {
     if (line.trim()) {
@@ -70,7 +70,7 @@ function build22Message(text) {
   }
   if (!header) return null;
 
-  // ===== Формат 1: блок "Підгрупа 2.2 ..." =====
+  // ===== Формат 1: "Підгрупа 2.2 відключення" =====
   let start22 = -1;
   for (let i = 0; i < lines.length; i++) {
     if (lines[i].includes("Підгрупа") && lines[i].includes("2.2")) {
@@ -101,10 +101,10 @@ function build22Message(text) {
     return parsedText;
   }
 
-  // ===== Формат 2: один рядок "2.2 підгрупа" =====
+  // ===== Формат 2: "2.2 підгрупу" =====
   let line22 = null;
   for (const line of lines) {
-    if (line.includes("2.2") && line.toLowerCase().includes("підгруп")) {
+    if (line.includes("2.2") && line.includes("підгруп")) {
       line22 = line;
       break;
     }
@@ -122,9 +122,7 @@ function build22Message(text) {
 
 export default {
   async fetch(request, env) {
-    if (request.method !== "POST") {
-      return new Response("OK");
-    }
+    if (request.method !== "POST") return new Response("OK");
 
     const update = await request.json();
     const msg = update.message || update.channel_post;
@@ -135,11 +133,11 @@ export default {
 
     const payload = build22Message(text);
     if (!payload) {
-      console.log("No payload generated for:", text);
+      console.log("No payload generated");
       return new Response("OK");
     }
 
-    const resp = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
+    await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -149,9 +147,7 @@ export default {
       })
     });
 
-    const data = await resp.text();
-    console.log("Telegram response:", data);
-
+    console.log("Message sent to channel");
     return new Response("OK");
   }
 };
