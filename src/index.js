@@ -49,88 +49,92 @@ function parseDarkHours(text) {
 }
 
 function extract22Section(text) {
+  console.log("=== RAW INPUT ===", text.substring(0, 800));
+
   const lines = text.split('\n');
   
-  // ✅ ШАПКА: перші 2-3 непорожні рядки БЕЗ дублів 📆
+  // 🛡️ ШАПКА: перші 2 непорожні рядки (БЕЗ дублів)
   let headerLines = [];
-  let dateSeen = false;
-  for (let i = 0; i < lines.length && headerLines.length < 3; i++) {
+  for (let i = 0; i < Math.min(lines.length, 3); i++) {
     const line = lines[i].trim();
-    if (!line) continue;
-    
-    // Додаємо дати тільки ОДИН раз
-    if ((line.match(/📆|📅/) || line.match(/\d{2}\.\d{2}\.\d{4}/)) && dateSeen) continue;
-    if (line.match(/📆|📅|\d{2}\.\d{2}\.\d{4}/)) dateSeen = true;
-    
-    headerLines.push(line);
+    if (line && !headerLines.some(h => h.includes(line))) {
+      headerLines.push(line);
+    }
   }
-  const fullHeader = headerLines.join('\n').trim() || '💡Графік відключень';
+  const header = headerLines.join('\n') || '💡Графік';
 
-  // 🎯 Тільки 2.2 секція
-  const patterns = [/Підгрупа\s*2\.2/i, /Група\s*2\.2/i, /черга\s*2\.2/i, /2\.2\b/i];
-  let startLine = -1;
-
+  // 🎯 ТІЛЬКИ 2.2 блок
+  const patterns = [/Підгрупа 2\.2/i, /Група 2\.2/i, /черга 2\.2/i, /2\.2\b/i];
+  let startIdx = -1;
+  
   for (let i = 0; i < lines.length; i++) {
     for (const pat of patterns) {
       if (lines[i].match(pat)) {
-        startLine = i;
+        startIdx = i;
         break;
       }
     }
-    if (startLine !== -1) break;
+    if (startIdx !== -1) break;
   }
 
-  if (startLine === -1) {
-    console.log("❌ No 2.2");
+  if (startIdx === -1) {
+    console.log("❌ ZERO 2.2 MATCHES");
     return null;
   }
 
-  // СТРОГО до наступної групи (НЕ включаємо 1.1 чи інші)
-  let endLine = lines.length;
-  for (let i = startLine + 1; i < lines.length; i++) {
-    if (lines[i].match(/Підгрупа\s*(?!2\.)[3-9\.]|Група\s*[3-9]|черга\s*[3-9]|✅|Для всіх інших/i)) {
-      endLine = i;
+  // СТРОГО до наступної групи
+  let endIdx = lines.length;
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    if (lines[i].match(/(Підгрупа|Група|черга)\s*(?!2\.)[1-9]/i) || lines[i].match(/✅|Для всіх/i)) {
+      endIdx = i;
       break;
     }
   }
 
-  const my22Lines = lines.slice(startLine, endLine).filter(l => l.trim() && !l.match(/1\.1|Група 1|Підгрупа 1/i));
-  const my22Section = my22Lines.join('\n');
+  // ФІЛЬТР: ТІЛЬКИ 2.2 рядки
+  const sectionLines = lines.slice(startIdx, endIdx)
+    .filter(l => l.trim() && (l.match(/2\.2/) || l.match(/\d{2}:\d{2}/)));
+    
+  const section = sectionLines.join('\n');
 
-  console.log("📅 Header (no dups):", fullHeader);
-  console.log("🎯 2.2 only:", my22Section || "EMPTY");
+  console.log("📅 HEADER:", header);
+  console.log("🎯 SECTION (lines", sectionLines.length, "):", section || "EMPTY");
 
-  return `${fullHeader}\n\n${my22Section}`.trim();
+  return `${header}\n\n${section}`.trim();
 }
 
 function build22Message(text) {
   const section = extract22Section(text);
-  if (!section) return null;
+  if (!section) {
+    console.log("💥 FAILED TO BUILD");
+    return null;
+  }
 
-  const [parsedText, darkInfo] = parseDarkHours(section);
-  const fullMsg = darkInfo ? `${parsedText}\n\n${darkInfo}` : parsedText;
-  console.log("📤 Final:", fullMsg.substring(0, 400));
-  return fullMsg;
+  const [parsed, summary] = parseDarkHours(section);
+  const msg = summary ? `${parsed}\n\n${summary}` : parsed;
+  
+  console.log("📤 FINAL MSG:", msg);
+  return msg;
 }
 
 export default {
   async fetch(request, env) {
     if (request.method !== "POST") return new Response("OK");
 
-    const update = await request.json().catch(() => null);
-    if (!update) return new Response("OK");
-
+    const update = await request.json().catch(() => ({}));
     const msg = update.message || update.channel_post;
-    if (!msg) return new Response("OK");
+    
+    if (!msg?.text && !msg?.caption) {
+      console.log("⚠️ No text");
+      return new Response("OK");
+    }
 
-    const text = msg.text || msg.caption || "";
-    if (!text) return new Response("OK");
-
-    console.log("📥 Input preview:", text.substring(0, 300));
+    const text = msg.text || msg.caption;
+    console.log("🚀 Processing...");
 
     const payload = build22Message(text);
     if (!payload) {
-      console.log("⏭️ Skip no 2.2");
+      console.log("⏭️ Skip");
       return new Response("OK");
     }
 
@@ -144,7 +148,7 @@ export default {
       })
     });
 
-    console.log("✅ Done:", res.status);
+    console.log("✅ Telegram:", res.status);
     return new Response("OK");
   }
 };
