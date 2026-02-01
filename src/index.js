@@ -1,126 +1,119 @@
-// Функція форматування часу (безпечна)
-function formatDuration(startStr, endStr) {
+// --- ДОПОМІЖНІ ФУНКЦІЇ ---
+
+function calculateDuration(start, end) {
   try {
-    const [sh, sm] = startStr.split(":").map(Number);
-    const [eh, em] = endStr.split(":").map(Number);
+    const [sh, sm] = start.split(":").map(Number);
+    const [eh, em] = end.split(":").map(Number);
     let diff = (eh * 60 + em) - (sh * 60 + sm);
-    if (diff < 0) diff += 24 * 60;
-    if (diff <= 0) return "";
-    return `(${(diff / 60).toFixed(1)} год)`;
-  } catch (e) { return ""; }
-}
-
-// Головний парсер (безпечний)
-function safeParse(text) {
-  try {
-    const lines = text.split('\n');
-    
-    // 1. Шапка (дата)
-    const header = lines.slice(0, 3)
-      .filter(l => l.match(/\d{2}\.\d{2}|Графік|Понеділок|Вівторок|Середа|Четвер|П'ятниця|Субота|Неділя/i))
-      .slice(0, 2).join('\n') || "💡 Графік";
-
-    // 2. Пошук 2.2
-    // Шукаємо рядок з "2.2"
-    const startIdx = lines.findIndex(l => l.match(/2\.2/));
-    if (startIdx === -1) return null;
-
-    // 3. Пошук кінця (інша група або кінець)
-    // Шукаємо "Група X", "Черга X", "1.", "3." і т.д.
-    let endIdx = lines.findIndex((l, i) => i > startIdx && l.match(/(?:^|\s)(1\.|3\.|4\.|5\.|6\.|Група\s*[13456]|Черга\s*[13456]|✅)/i));
-    if (endIdx === -1) endIdx = lines.length;
-
-    // Вирізаємо текст групи
-    let groupText = lines.slice(startIdx, endIdx).join('\n').trim();
-
-    // 4. Додаємо години
-    let totalMinutes = 0;
-    const timePattern = /(\d{2}:\d{2})\s*(?:-|–|до)\s*(\d{2}:\d{2})/gi;
-    
-    groupText = groupText.replace(timePattern, (match, start, end) => {
-      const dur = formatDuration(start, end);
-      if (dur) {
-        const [sh, sm] = start.split(":").map(Number);
-        const [eh, em] = end.split(":").map(Number);
-        let diff = (eh * 60 + em) - (sh * 60 + sm);
-        if (diff < 0) diff += 24 * 60;
-        totalMinutes += diff;
-        return `${match} ${dur}`;
-      }
-      return match;
-    });
-
-    const totalHours = (totalMinutes / 60).toFixed(1);
-    const footer = totalHours > 0 ? `\n\n⚫ Разом: ${totalHours} год` : "";
-
-    return `${header}\n\n${groupText}${footer}`;
-
-  } catch (err) {
-    console.error("PARSING ERROR:", err);
-    return null;
+    if (diff < 0) diff += 24 * 60; // перехід через добу
+    return diff;
+  } catch {
+    return 0;
   }
 }
 
-export default {
-  async fetch(request, env) {
-    // ГЛОБАЛЬНИЙ ЗАХИСТ: Завжди повертаємо 200 OK, навіть якщо все впало
-    try {
-      if (request.method !== "POST") return new Response("OK");
-
-      // ПЕРЕВІРКА ЗМІННИХ (це часта причина 500 помилки)
-      if (!env.BOT_TOKEN) {
-        console.error("❌ ПОМИЛКА: Не задано BOT_TOKEN у Settings -> Variables");
-        return new Response("OK");
+function processLinesWithHours(lines) {
+  let totalMinutes = 0;
+  const processedLines = lines.map(line => {
+    // Шукаємо час у форматі 00:00-00:00 або з 00:00 до 00:00
+    return line.replace(/(\d{2}:\d{2})\s*(?:-|–|до)\s*(\d{2}:\d{2})/gi, (match, start, end) => {
+      const minutes = calculateDuration(start, end);
+      if (minutes > 0) {
+        totalMinutes += minutes;
+        return `${match} (${(minutes / 60).toFixed(1)} год)`;
       }
-      if (!env.CHANNEL_ID) {
-        console.error("❌ ПОМИЛКА: Не задано CHANNEL_ID у Settings -> Variables");
-        return new Response("OK");
-      }
+      return match;
+    });
+  });
 
-      let update;
-      try {
-        update = await request.json();
-      } catch {
-        return new Response("OK");
-      }
+  const totalHours = (totalMinutes / 60).toFixed(1);
+  if (totalHours > 0) {
+    processedLines.push(`\n⚫ Разом без світла: ${totalHours} год`);
+  }
+  return processedLines.join('\n');
+}
 
-      const msg = update.message || update.channel_post;
-      if (!msg || !msg.text) return new Response("OK");
+// --- ГОЛОВНИЙ ПАРСЕР ---
 
-      console.log("📥 Отримано текст:", msg.text.substring(0, 50).replace(/\n/g, " "));
+function parseSchedule(text) {
+  const lines = text.split('\n');
+  const header = [];
+  const body = [];
+  
+  let found22 = false;
 
-      // Виконуємо парсинг
-      const payload = safeParse(msg.text);
+  // 1. Витягуємо шапку (перші 2-3 рядки, де є текст або дати)
+  for (let i = 0; i < Math.min(lines.length, 5); i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    // Якщо це опис групи - шапка закінчилась
+    if (line.match(/група|черга|підгрупа/i)) break;
+    header.push(line);
+  }
 
-      if (!payload) {
-        console.log("⚠️ Групу 2.2 не знайдено або помилка парсингу.");
-        return new Response("OK");
-      }
+  // 2. Шукаємо 2.2 і читаємо до наступної групи
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
 
-      console.log("📤 Відправляю:", payload.substring(0, 50).replace(/\n/g, " "));
-
-      // Відправка
-      const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: env.CHANNEL_ID,
-          text: payload,
-          disable_web_page_preview: true
-        })
-      });
-
-      if (!res.ok) {
-        console.error("❌ Помилка Telegram API:", await res.text());
-      } else {
-        console.log("✅ Успішно відправлено!");
-      }
-
-    } catch (criticalError) {
-      console.error("🔥 КРИТИЧНА ПОМИЛКА (500):", criticalError.stack);
+    // ПЕРЕВІРКА НА СТАРТ: чи є тут 2.2?
+    if (line.match(/2\.2/)) {
+      found22 = true;
+      body.push(line); // Додаємо заголовок групи
+      continue;
     }
 
-    // ЗАВЖДИ відповідаємо OK, щоб зняти зависання Telegram
-    return new Response("OK", { status: 200 });
+    if (found22) {
+      // ПЕРЕВІРКА НА СТОП: чи це початок іншої групи?
+      // Шукаємо 1.x, 3.x, 4.x, 5.x, 6.x або слова "Група/Черга/Всі інші"
+      if (line.match(/(?:^|\s)(1\.|3\.|4\.|5\.|6\.|✅|єСвітло|Для всіх)/)) {
+        break; // Зупиняємось, далі чужий графік
+      }
+      // Якщо це не нова група - додаємо рядок собі
+      body.push(line);
+    }
+  }
+
+  if (!found22) return null; // Не знайшли 2.2
+
+  // 3. Формуємо результат
+  const headerText = header.join('\n');
+  const bodyText = processLinesWithHours(body);
+
+  return `${headerText}\n\n${bodyText}`;
+}
+
+// --- ОБРОБНИК ЗАПИТІВ ---
+
+export default {
+  async fetch(request, env) {
+    if (request.method !== "POST") return new Response("OK");
+
+    try {
+      const update = await request.json();
+      const msg = update.message || update.channel_post;
+      
+      if (!msg || (!msg.text && !msg.caption)) return new Response("OK");
+
+      const text = msg.text || msg.caption;
+      const responseText = parseSchedule(text);
+
+      if (responseText) {
+        await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: env.CHANNEL_ID,
+            text: responseText,
+            disable_web_page_preview: true
+          })
+        });
+      }
+
+    } catch (e) {
+      console.error("Error:", e);
+    }
+
+    return new Response("OK");
   }
 };
