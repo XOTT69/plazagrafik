@@ -49,20 +49,22 @@ function parseDarkHours(text) {
 }
 
 function extract22Section(text) {
-  // ✅ ПОВНА ШАПКА: від початку до першого 📆 або до 2.2
-  const fullHeaderMatch = text.match(/💡.*?📆.*?📆/s) || text.match(/💡.*?📅/s);
-  const fullHeader = fullHeaderMatch ? fullHeaderMatch[0].trim() : '💡Графік відключень';
-
-  // Знаходимо початок 2.2
-  const patterns = [
-    /Підгрупа\s*2\.2/i,
-    /Група\s*2\.2/i,
-    /черга\s*2\.2/i,
-    /2\.2\b/i
-  ];
-
-  let startLine = -1;
   const lines = text.split('\n');
+  
+  // ✅ ШАПКА: перші непорожні рядки + ВСІ 📆 дати
+  let headerLines = [];
+  for (let i = 0; i < lines.length && headerLines.length < 4; i++) {
+    if (lines[i].trim()) {
+      headerLines.push(lines[i]);
+      // Збираємо ВСІ дати 📆/📅
+      if (lines[i].match(/📆|📅/)) headerLines.push(lines[i]);
+    }
+  }
+  const fullHeader = headerLines.join('\n').trim() || '💡Графік відключень';
+
+  // Знаходимо мою 2.2
+  const patterns = [/Підгрупа\s*2\.2/i, /Група\s*2\.2/i, /черга\s*2\.2/i, /2\.2\b/i];
+  let startLine = -1;
 
   for (let i = 0; i < lines.length; i++) {
     for (const pat of patterns) {
@@ -75,11 +77,11 @@ function extract22Section(text) {
   }
 
   if (startLine === -1) {
-    console.log("❌ No 2.2 start found");
+    console.log("❌ No 2.2 found");
     return null;
   }
 
-  // Беремо тільки мою 2.2 секцію до наступної групи
+  // Тільки моя секція 2.2
   let endLine = lines.length;
   for (let i = startLine + 1; i < lines.length; i++) {
     if (lines[i].match(/Підгрупа\s*[3-9]|Група\s*[3-9]|черга\s*[3-9]|✅|Для всіх інших/i)) {
@@ -91,8 +93,8 @@ function extract22Section(text) {
   const my22Lines = lines.slice(startLine, endLine).filter(l => l.trim());
   const my22Section = my22Lines.join('\n');
 
-  console.log(`✅ Full header:`, fullHeader.substring(0, 100));
-  console.log(`✅ My 2.2 (${my22Lines.length} lines):`, my22Section);
+  console.log("📅 Full header:", fullHeader);
+  console.log("🎯 My 2.2:", my22Section.substring(0, 150));
 
   return `${fullHeader}\n\n${my22Section}`.trim();
 }
@@ -103,7 +105,7 @@ function build22Message(text) {
 
   const [parsedText, darkInfo] = parseDarkHours(section);
   const fullMsg = darkInfo ? `${parsedText}\n\n${darkInfo}` : parsedText;
-  console.log("📤 Full payload:", fullMsg.substring(0, 300));
+  console.log("📤 Payload:", fullMsg.substring(0, 350));
   return fullMsg;
 }
 
@@ -120,11 +122,11 @@ export default {
     const text = msg.text || msg.caption || "";
     if (!text) return new Response("OK");
 
-    console.log("📥 Full input preview:", text.substring(0, 200));
+    console.log("📥 Input:", text.substring(0, 250));
 
     const payload = build22Message(text);
     if (!payload) {
-      console.log("⏭️ No 2.2 - skipping");
+      console.log("⏭️ Skip");
       return new Response("OK");
     }
 
@@ -138,7 +140,7 @@ export default {
       })
     });
 
-    console.log("✅ Posted:", res.status);
+    console.log("✅ Status:", res.status);
     return new Response("OK");
   }
 };
