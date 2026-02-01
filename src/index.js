@@ -49,46 +49,50 @@ function parseDarkHours(text) {
 }
 
 function extract22Section(text) {
-  const lines = text.split("\n");
-  let start = -1, end = lines.length;
+  // Заголовок з датами
+  const dateMatches = text.match(/(📆|📅).*?(?=\n\n|\n✅|$)/gi) || [];
+  const header = dateMatches.slice(0, 2).join('\n') || '💡Графік відключень на сьогодні';
 
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].includes("2.2")) {
-      start = i;
+  // Універсальні патерни для 2.2
+  const patterns = [
+    /Підгрупа\s*2\.2\s*відключення?/i,
+    /Група\s*2\.2/i,
+    /черга\s*2\.2/i,
+    /2\.2\s*(відключення?|секція)/i,
+    /2\.2\b/i
+  ];
+
+  let fullSection = '';
+
+  for (const pat of patterns) {
+    const match = text.match(pat);
+    if (match) {
+      const start = match.index;
+      const endMatch = text.slice(start).match(/(\n\s*Підгрупа\s*[3-9]|\n✅|\nДля всіх інших|\nєСвітло)/i);
+      const end = endMatch ? start + endMatch.index : text.length;
+      
+      fullSection = text.slice(start, end).trim();
+      console.log(`✅ 2.2 found via "${pat}", preview:`, fullSection.substring(0, 150));
       break;
     }
   }
-  if (start === -1) return null;
 
-  for (let i = start + 1; i < lines.length; i++) {
-    if (
-      lines[i].includes("Підгрупа") ||
-      lines[i].includes("✅") ||
-      lines[i].includes("Для всіх інших") ||
-      lines[i].includes("єСвітло")
-    ) {
-      end = i;
-      break;
-    }
+  if (!fullSection) {
+    console.log("❌ No 2.2 variants found");
+    return null;
   }
 
-  const headerLines = [];
-  for (let i = 0; i < lines.length && headerLines.length < 2; i++) {
-    if (lines[i].trim()) headerLines.push(lines[i]);
-  }
-
-  return [...headerLines, "", lines.slice(start, end).join("\n")].join("\n").trim();
+  return `${header}\n\n${fullSection}`.trim();
 }
 
 function build22Message(text) {
   const section = extract22Section(text);
-  if (!section) {
-    console.log("No 2.2 section");
-    return null;
-  }
+  if (!section) return null;
 
   const [parsedText, darkInfo] = parseDarkHours(section);
-  return darkInfo ? `${parsedText}\n\n${darkInfo}` : parsedText;
+  const fullMsg = darkInfo ? `${parsedText}\n\n${darkInfo}` : parsedText;
+  console.log("📤 Sending full 2.2:", fullMsg.substring(0, 200));
+  return fullMsg;
 }
 
 export default {
@@ -104,15 +108,13 @@ export default {
     const text = msg.text || msg.caption || "";
     if (!text) return new Response("OK");
 
-    console.log("Text preview:", text.substring(0, 100));
+    console.log("📥 Text preview:", text.substring(0, 100));
 
     const payload = build22Message(text);
     if (!payload) {
-      console.log("No 2.2 payload");
+      console.log("⏭️ Skipping: no 2.2");
       return new Response("OK");
     }
-
-    console.log("Sending payload:", payload.substring(0, 100));
 
     const res = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
       method: "POST",
@@ -120,12 +122,13 @@ export default {
       body: JSON.stringify({
         chat_id: env.CHANNEL_ID,
         text: payload,
-        disable_web_page_preview: true
+        disable_web_page_preview: true,
+        parse_mode: "Markdown"
       })
     });
 
     const resText = await res.text();
-    console.log("Send result:", res.status, resText.substring(0, 200));
+    console.log("✅ Send result:", res.status, resText.substring(0, 100));
 
     return new Response("OK");
   }
