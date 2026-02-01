@@ -49,9 +49,9 @@ function parseDarkHours(text) {
 }
 
 function extract22Section(text) {
-  // Заголовок з датами
-  const dateMatches = text.match(/(📆|📅).*?(?=\n\n|\n✅|$)/gi) || [];
-  const header = dateMatches.slice(0, 2).join('\n') || '💡Графік відключень на сьогодні';
+  // ✅ ПОВНА ШАПКА: від початку до першого 📆 або до 2.2
+  const fullHeaderMatch = text.match(/💡.*?📆.*?📆/s) || text.match(/💡.*?📅/s);
+  const fullHeader = fullHeaderMatch ? fullHeaderMatch[0].trim() : '💡Графік відключень';
 
   // Знаходимо початок 2.2
   const patterns = [
@@ -79,7 +79,7 @@ function extract22Section(text) {
     return null;
   }
 
-  // Беремо від 2.2 до наступної групи (НЕ включаємо її)
+  // Беремо тільки мою 2.2 секцію до наступної групи
   let endLine = lines.length;
   for (let i = startLine + 1; i < lines.length; i++) {
     if (lines[i].match(/Підгрупа\s*[3-9]|Група\s*[3-9]|черга\s*[3-9]|✅|Для всіх інших/i)) {
@@ -91,9 +91,10 @@ function extract22Section(text) {
   const my22Lines = lines.slice(startLine, endLine).filter(l => l.trim());
   const my22Section = my22Lines.join('\n');
 
-  console.log(`✅ 2.2 section: lines ${startLine}-${endLine}, content:`, my22Section.substring(0, 200));
+  console.log(`✅ Full header:`, fullHeader.substring(0, 100));
+  console.log(`✅ My 2.2 (${my22Lines.length} lines):`, my22Section);
 
-  return `${header}\n\n${my22Section}`.trim();
+  return `${fullHeader}\n\n${my22Section}`.trim();
 }
 
 function build22Message(text) {
@@ -102,7 +103,7 @@ function build22Message(text) {
 
   const [parsedText, darkInfo] = parseDarkHours(section);
   const fullMsg = darkInfo ? `${parsedText}\n\n${darkInfo}` : parsedText;
-  console.log("📤 Final payload:", fullMsg.substring(0, 250));
+  console.log("📤 Full payload:", fullMsg.substring(0, 300));
   return fullMsg;
 }
 
@@ -119,7 +120,7 @@ export default {
     const text = msg.text || msg.caption || "";
     if (!text) return new Response("OK");
 
-    console.log("📥 Input preview:", text.substring(0, 150));
+    console.log("📥 Full input preview:", text.substring(0, 200));
 
     const payload = build22Message(text);
     if (!payload) {
@@ -137,7 +138,7 @@ export default {
       })
     });
 
-    console.log("📤 Sent:", res.status);
+    console.log("✅ Posted:", res.status);
     return new Response("OK");
   }
 };
