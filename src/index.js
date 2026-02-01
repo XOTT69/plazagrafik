@@ -51,18 +51,22 @@ function parseDarkHours(text) {
 function extract22Section(text) {
   const lines = text.split('\n');
   
-  // ✅ ШАПКА: перші непорожні рядки + ВСІ 📆 дати
+  // ✅ ШАПКА: перші 2-3 непорожні рядки БЕЗ дублів 📆
   let headerLines = [];
-  for (let i = 0; i < lines.length && headerLines.length < 4; i++) {
-    if (lines[i].trim()) {
-      headerLines.push(lines[i]);
-      // Збираємо ВСІ дати 📆/📅
-      if (lines[i].match(/📆|📅/)) headerLines.push(lines[i]);
-    }
+  let dateSeen = false;
+  for (let i = 0; i < lines.length && headerLines.length < 3; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    
+    // Додаємо дати тільки ОДИН раз
+    if ((line.match(/📆|📅/) || line.match(/\d{2}\.\d{2}\.\d{4}/)) && dateSeen) continue;
+    if (line.match(/📆|📅|\d{2}\.\d{2}\.\d{4}/)) dateSeen = true;
+    
+    headerLines.push(line);
   }
   const fullHeader = headerLines.join('\n').trim() || '💡Графік відключень';
 
-  // Знаходимо мою 2.2
+  // 🎯 Тільки 2.2 секція
   const patterns = [/Підгрупа\s*2\.2/i, /Група\s*2\.2/i, /черга\s*2\.2/i, /2\.2\b/i];
   let startLine = -1;
 
@@ -77,24 +81,24 @@ function extract22Section(text) {
   }
 
   if (startLine === -1) {
-    console.log("❌ No 2.2 found");
+    console.log("❌ No 2.2");
     return null;
   }
 
-  // Тільки моя секція 2.2
+  // СТРОГО до наступної групи (НЕ включаємо 1.1 чи інші)
   let endLine = lines.length;
   for (let i = startLine + 1; i < lines.length; i++) {
-    if (lines[i].match(/Підгрупа\s*[3-9]|Група\s*[3-9]|черга\s*[3-9]|✅|Для всіх інших/i)) {
+    if (lines[i].match(/Підгрупа\s*(?!2\.)[3-9\.]|Група\s*[3-9]|черга\s*[3-9]|✅|Для всіх інших/i)) {
       endLine = i;
       break;
     }
   }
 
-  const my22Lines = lines.slice(startLine, endLine).filter(l => l.trim());
+  const my22Lines = lines.slice(startLine, endLine).filter(l => l.trim() && !l.match(/1\.1|Група 1|Підгрупа 1/i));
   const my22Section = my22Lines.join('\n');
 
-  console.log("📅 Full header:", fullHeader);
-  console.log("🎯 My 2.2:", my22Section.substring(0, 150));
+  console.log("📅 Header (no dups):", fullHeader);
+  console.log("🎯 2.2 only:", my22Section || "EMPTY");
 
   return `${fullHeader}\n\n${my22Section}`.trim();
 }
@@ -105,7 +109,7 @@ function build22Message(text) {
 
   const [parsedText, darkInfo] = parseDarkHours(section);
   const fullMsg = darkInfo ? `${parsedText}\n\n${darkInfo}` : parsedText;
-  console.log("📤 Payload:", fullMsg.substring(0, 350));
+  console.log("📤 Final:", fullMsg.substring(0, 400));
   return fullMsg;
 }
 
@@ -122,11 +126,11 @@ export default {
     const text = msg.text || msg.caption || "";
     if (!text) return new Response("OK");
 
-    console.log("📥 Input:", text.substring(0, 250));
+    console.log("📥 Input preview:", text.substring(0, 300));
 
     const payload = build22Message(text);
     if (!payload) {
-      console.log("⏭️ Skip");
+      console.log("⏭️ Skip no 2.2");
       return new Response("OK");
     }
 
@@ -140,7 +144,7 @@ export default {
       })
     });
 
-    console.log("✅ Status:", res.status);
+    console.log("✅ Done:", res.status);
     return new Response("OK");
   }
 };
