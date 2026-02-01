@@ -53,36 +53,31 @@ function extract22Section(text) {
   const dateMatches = text.match(/(📆|📅).*?(?=\n\n|\n✅|$)/gi) || [];
   const header = dateMatches.slice(0, 2).join('\n') || '💡Графік відключень на сьогодні';
 
-  // Універсальні патерни для 2.2
+  // Тільки рядки з 2.2 (універсально)
   const patterns = [
-    /Підгрупа\s*2\.2\s*відключення?/i,
-    /Група\s*2\.2/i,
-    /черга\s*2\.2/i,
-    /2\.2\s*(відключення?|секція)/i,
-    /2\.2\b/i
+    /Підгрупа\s*2\.2[^\n]*?(?=\n|$)/i,
+    /Група\s*2\.2[^\n]*?(?=\n|$)/i,
+    /черга\s*2\.2[^\n]*?(?=\n|$)/i,
+    /(?:^|\n)2\.2\s*[^\n]*?(?=\n|$)/i
   ];
 
-  let fullSection = '';
+  let my22Lines = [];
 
   for (const pat of patterns) {
-    const match = text.match(pat);
-    if (match) {
-      const start = match.index;
-      const endMatch = text.slice(start).match(/(\n\s*Підгрупа\s*[3-9]|\n✅|\nДля всіх інших|\nєСвітло)/i);
-      const end = endMatch ? start + endMatch.index : text.length;
-      
-      fullSection = text.slice(start, end).trim();
-      console.log(`✅ 2.2 found via "${pat}", preview:`, fullSection.substring(0, 150));
-      break;
-    }
+    const matches = [...text.matchAll(pat)];
+    my22Lines.push(...matches.map(m => m[0].trim()));
+    if (my22Lines.length > 0) break;
   }
 
-  if (!fullSection) {
-    console.log("❌ No 2.2 variants found");
+  if (!my22Lines.length) {
+    console.log("❌ No 2.2 lines found");
     return null;
   }
 
-  return `${header}\n\n${fullSection}`.trim();
+  const my22Section = my22Lines.join('\n');
+  console.log(`✅ My 2.2 only (${my22Lines.length} lines):`, my22Section);
+
+  return `${header}\n\n${my22Section}`.trim();
 }
 
 function build22Message(text) {
