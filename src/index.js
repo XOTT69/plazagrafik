@@ -53,29 +53,45 @@ function extract22Section(text) {
   const dateMatches = text.match(/(📆|📅).*?(?=\n\n|\n✅|$)/gi) || [];
   const header = dateMatches.slice(0, 2).join('\n') || '💡Графік відключень на сьогодні';
 
-  // Тільки рядки з 2.2 (універсально)
+  // Знаходимо початок 2.2
   const patterns = [
-    /Підгрупа\s*2\.2[^\n]*?(?=\n|$)/i,
-    /Група\s*2\.2[^\n]*?(?=\n|$)/i,
-    /черга\s*2\.2[^\n]*?(?=\n|$)/i,
-    /(?:^|\n)2\.2\s*[^\n]*?(?=\n|$)/i
+    /Підгрупа\s*2\.2/i,
+    /Група\s*2\.2/i,
+    /черга\s*2\.2/i,
+    /2\.2\b/i
   ];
 
-  let my22Lines = [];
+  let startLine = -1;
+  const lines = text.split('\n');
 
-  for (const pat of patterns) {
-    const matches = [...text.matchAll(pat)];
-    my22Lines.push(...matches.map(m => m[0].trim()));
-    if (my22Lines.length > 0) break;
+  for (let i = 0; i < lines.length; i++) {
+    for (const pat of patterns) {
+      if (lines[i].match(pat)) {
+        startLine = i;
+        break;
+      }
+    }
+    if (startLine !== -1) break;
   }
 
-  if (!my22Lines.length) {
-    console.log("❌ No 2.2 lines found");
+  if (startLine === -1) {
+    console.log("❌ No 2.2 start found");
     return null;
   }
 
+  // Беремо від 2.2 до наступної групи (НЕ включаємо її)
+  let endLine = lines.length;
+  for (let i = startLine + 1; i < lines.length; i++) {
+    if (lines[i].match(/Підгрупа\s*[3-9]|Група\s*[3-9]|черга\s*[3-9]|✅|Для всіх інших/i)) {
+      endLine = i;
+      break;
+    }
+  }
+
+  const my22Lines = lines.slice(startLine, endLine).filter(l => l.trim());
   const my22Section = my22Lines.join('\n');
-  console.log(`✅ My 2.2 only (${my22Lines.length} lines):`, my22Section);
+
+  console.log(`✅ 2.2 section: lines ${startLine}-${endLine}, content:`, my22Section.substring(0, 200));
 
   return `${header}\n\n${my22Section}`.trim();
 }
@@ -86,7 +102,7 @@ function build22Message(text) {
 
   const [parsedText, darkInfo] = parseDarkHours(section);
   const fullMsg = darkInfo ? `${parsedText}\n\n${darkInfo}` : parsedText;
-  console.log("📤 Sending full 2.2:", fullMsg.substring(0, 200));
+  console.log("📤 Final payload:", fullMsg.substring(0, 250));
   return fullMsg;
 }
 
@@ -103,11 +119,11 @@ export default {
     const text = msg.text || msg.caption || "";
     if (!text) return new Response("OK");
 
-    console.log("📥 Text preview:", text.substring(0, 100));
+    console.log("📥 Input preview:", text.substring(0, 150));
 
     const payload = build22Message(text);
     if (!payload) {
-      console.log("⏭️ Skipping: no 2.2");
+      console.log("⏭️ No 2.2 - skipping");
       return new Response("OK");
     }
 
@@ -117,14 +133,11 @@ export default {
       body: JSON.stringify({
         chat_id: env.CHANNEL_ID,
         text: payload,
-        disable_web_page_preview: true,
-        parse_mode: "Markdown"
+        disable_web_page_preview: true
       })
     });
 
-    const resText = await res.text();
-    console.log("✅ Send result:", res.status, resText.substring(0, 100));
-
+    console.log("📤 Sent:", res.status);
     return new Response("OK");
   }
 };
