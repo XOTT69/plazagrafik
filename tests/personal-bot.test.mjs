@@ -114,7 +114,7 @@ test('a signed Plaza /start gets the private menu, no channel publication',async
   const env={
     BOT_TOKEN:'123:abc',WEBHOOK_SECRET:'plaza-secret',
     CHANNEL_ID:'@plazakvartal_svitlo',ADMIN_TELEGRAM_ID:'999',
-    SCHEDULE_STATE:{idFromName:()=>1,get:()=>stub},
+    SCHEDULE_STATE:{idFromName:()=>1,get:()=>({fetch:(url,opts)=>stub.fetch(new Request(url,opts))})},
     TEST_FETCH:async(_url,opts)=>{
       sent.push(JSON.parse(opts.body));
       return Response.json({ok:true,result:{message_id:4}});
@@ -139,7 +139,7 @@ test('DTEK private /start sends via independent token without using Plaza channe
   const env={
     BOT_TOKEN:'plaza:unused',CHANNEL_ID:'@plazakvartal_svitlo',
     DTEK_BOT_TOKEN:'9876:other',DTEK_WEBHOOK_SECRET:'my-dtek-secret',
-    SCHEDULE_STATE:{idFromName:()=>1,get:()=>stub},
+    SCHEDULE_STATE:{idFromName:()=>1,get:()=>({fetch:(url,opts)=>stub.fetch(new Request(url,opts))})},
     TEST_FETCH:async(url,opts)=>{
       sent.push([String(url),JSON.parse(opts.body)]);
       return Response.json({ok:true,result:{message_id:7}});
