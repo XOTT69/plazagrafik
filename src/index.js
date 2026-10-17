@@ -57,7 +57,7 @@ export class Group22Publisher {
       let payload;
       try{payload=await request.json();}catch{return Response.json({status:'invalid'},{status:400});}
       const scope=payload?.scope, id=String(payload?.userId||'');
-      if(!['plaza','dtek'].includes(scope)||!/^[1-9]\\d{0,17}$/.test(id))
+      if(!['plaza','dtek'].includes(scope)||!/^[1-9][0-9]{0,17}$/.test(id))
         return Response.json({status:'invalid'},{status:400});
       const key='profile:'+scope+':'+id;
       if(payload.profile){
