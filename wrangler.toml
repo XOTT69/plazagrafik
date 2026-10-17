@@ -1,3 +1,18 @@
 name = "plazagrafik"
 main = "src/index.js"
 compatibility_date = "2026-01-12"
+
+# Run every five minutes. Webhook posts are ignored to prevent copies
+# when an admin posts to the channel manually.
+[triggers]
+crons = ["*/5 * * * *"]
+
+# Persistent per-day Telegram message IDs: new day -> new post,
+# changed hours -> edit the existing message, never duplicate.
+[[durable_objects.bindings]]
+name = "SCHEDULE_STATE"
+class_name = "Group22Publisher"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Group22Publisher"]
