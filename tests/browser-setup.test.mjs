@@ -101,7 +101,10 @@ test('explicit configured webhook secret continues to work for private owner',as
 });
 
 test('browser setup POST returns configuration error without secrets',async()=>{
-  const res=await worker.fetch(request(),{});
+  const res=await worker.fetch(new Request(BASE+'/setup',{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mode:'inspect'})
+  }),{});
   assert.equal(res.status,400);
   const json=await res.json();
   assert.equal(json.status,'configuration-required');
