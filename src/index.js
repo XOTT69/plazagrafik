@@ -1,9 +1,10 @@
 import {
-  SOURCE_URL,choosePosts,validatedPeriods,format22,kyivDate,
+  SOURCE_URL,choosePosts,validatedPeriods,format22,kyivDate,nextDate,
   scheduleFingerprint,scheduleFingerprintFromText
 } from './schedule22.js';
 import {parseForwardedGroup22} from './manual-forward.js';
-import {resolvedWebhookSecret,installOwnWebhook,inspectOwnWebhook,validateSetupKey,renderBrowserSetupPage} from './webhook-setup.js';
+import {personalAction,normalizedProfile} from './personal-bot.js';
+import {resolvedWebhookSecret,installOwnWebhook,inspectOwnWebhook,validateSetupKey,renderBrowserSetupPage,renderDtekSetupPage} from './webhook-setup.js';
 
 const TG_BASE='https://api.telegram.org/bot';
 const DAY=/^\d{4}-\d{2}-\d{2}$/;
@@ -51,7 +52,34 @@ export class Group22Publisher {
     this.queue=Promise.resolve();
   }
   async fetch(request) {
-    if(new URL(request.url).pathname!=='/publish'||request.method!=='POST')
+    const route=new URL(request.url).pathname;
+    if(route==='/profile' && request.method==='POST') {
+      let payload;
+      try{payload=await request.json();}catch{return Response.json({status:'invalid'},{status:400});}
+      const scope=payload?.scope, id=String(payload?.userId||'');
+      if(!['plaza','dtek'].includes(scope)||!/^[1-9][0-9]{0,17}$/.test(id))
+        return Response.json({status:'invalid'},{status:400});
+      const key='profile:'+scope+':'+id;
+      if(payload.profile){
+        const profile=normalizedProfile(payload.profile,scope);
+        await this.ctx.storage.put(key,profile);
+      }
+      return Response.json({profile:await this.ctx.storage.get(key)||null});
+    }
+    if(route==='/current' && request.method==='POST') {
+      let input;try{input=await request.json();}catch{return Response.json({status:'invalid'},{status:400});}
+      if(!DAY.test(input?.date||''))return Response.json({status:'invalid'},{status:400});
+      const item=await this.ctx.storage.get('date:'+input.date);
+      let periods=null;
+      if(item?.fingerprint) {
+        try {
+          const parsed=JSON.parse(item.fingerprint);
+          if(parsed.date===input.date)periods=validatedPeriods(parsed.periods);
+        } catch {}
+      }
+      return Response.json({periods});
+    }
+    if(route!=='/publish'||request.method!=='POST')
       return new Response('Not found',{status:404});
     const task=async()=>{
       let payload;
@@ -189,67 +217,140 @@ export async function checkDtekAndPublish(env,{fetchFn=fetch,now=new Date()}={})
   return results;
 }
 
-async function tellOwner(env,chatId,text) {
+function dtekEnv(env) {
+  // Separate token and signing key: the public DTEK bot cannot impersonate Plaza.
+  return {
+    ...env,
+    BOT_TOKEN:env.DTEK_BOT_TOKEN,
+    WEBHOOK_SECRET:env.DTEK_WEBHOOK_SECRET||'',
+    CHANNEL_ID:'@svitlo_kyivshchyna'
+  };
+}
+function publisherStub(env) {
+  return env.SCHEDULE_STATE.get(env.SCHEDULE_STATE.idFromName('confirmed-2.2'));
+}
+const DATA_COMMANDS=new Set([
+  '💡 Сьогодні','📅 Завтра','🕒 Зараз','⏳ Наступне',
+  '📊 Статистика','📚 Календар','📤 Поділитися',
+  '/today','/graph','/tomorrow','/now','/next','/stats','/history'
+]);
+async function privateMenu(env,scope,userId,chatId,text,now){
+  const value=text.trim();
+  const isChoice=value==='/start'||value==='/menu'||value==='/help'||
+    value==='↩️ Меню'||value==='🏠 Моя підгрупа'||
+    value==='⚙️ Налаштування'||value==='❓ Допомога'||
+    (scope==='dtek' && (value.startsWith('🏘 ') ||
+      value.startsWith('/group ')));
+  if(!isChoice && !DATA_COMMANDS.has(value))return false;
+  if(!env.SCHEDULE_STATE)throw new Error('SCHEDULE_STATE binding unavailable');
+  const stub=publisherStub(env);
+  const saved=await stub.fetch('https://state.internal/profile',{
+    method:'POST',body:JSON.stringify({scope,userId})
+  });
+  if(!saved.ok)throw new Error('Cannot load personal preferences');
+  const profile=(await saved.json()).profile;
+  let data={};
+  let override=null;
+  if(DATA_COMMANDS.has(text.trim())) {
+    const fetchFn=env.TEST_SOURCE_FETCH||fetch;
+    try{
+      const response=await fetchFn(SOURCE_URL,{
+        headers:{Accept:'application/json','Cache-Control':'no-cache'},
+        signal:AbortSignal.timeout(10000)
+      });
+      if(!response.ok)throw new Error('DTEK feed HTTP '+response.status);
+      data=await response.json();
+    }catch(error){
+      console.warn('Personal DTEK feed unavailable:',String(error?.message||error));
+      return await tellOwner(scope==='dtek'?dtekEnv(env):env,chatId,
+        '⚠️ Тимчасово не можу отримати підтверджені графіки. Спробуй трохи пізніше.');
+    }
+    if(scope==='plaza') {
+      const date=kyivDate(now), tomorrow=nextDate(date);
+      const dates=[date,tomorrow];
+      const results=await Promise.all(dates.map(async d=>{
+        const response=await stub.fetch('https://state.internal/current',{
+          method:'POST',body:JSON.stringify({date:d})
+        });
+        return response.ok?await response.json():{periods:null};
+      }));
+      // Only override the date currently requested; histories use public feed.
+      const selected=text.trim()==='📅 Завтра'||text.trim()==='/tomorrow'?1:0;
+      if(results[selected]?.periods)override={date:dates[selected],periods:results[selected].periods};
+    }
+  }
+  const result=personalAction({scope,text,profile,now,state:data,override});
+  if(!result.handled)return false;
+  if(result.changed) {
+    const response=await stub.fetch('https://state.internal/profile',{
+      method:'POST',body:JSON.stringify({scope,userId,profile:result.profile})
+    });
+    if(!response.ok)throw new Error('Cannot save personal preferences');
+  }
+  await tellOwner(scope==='dtek'?dtekEnv(env):env,chatId,result.text,
+    result.replyMarkup);
+  return true;
+}
+
+async function tellOwner(env,chatId,text,replyMarkup=null) {
   return telegramCall(env,'sendMessage',{
-    chat_id:chatId,text,
+    chat_id:chatId,text,reply_markup:replyMarkup||undefined,
     disable_notification:true,parse_mode:'HTML'
   },env.TEST_FETCH||fetch);
 }
 
-/** Telegram secret-header + sender-ID checks block forged and public posts. */
-export async function handleTelegramWebhook(request,env,{now=new Date()}={}) {
-  const expectedSecret=await resolvedWebhookSecret(env).catch(()=>null);
-  if(!expectedSecret || request.headers.get('X-Telegram-Bot-Api-Secret-Token')!==expectedSecret) {
+/** Only secret-signed private messages can operate the bots. */
+export async function handleTelegramWebhook(request,env,{now=new Date(),scope='plaza'}={}) {
+  if(scope==='dtek'&&!env.DTEK_BOT_TOKEN)
+    return new Response('DTEK bot is not configured',{status:503});
+  const botEnv=scope==='dtek'?dtekEnv(env):env;
+  const expectedSecret=await resolvedWebhookSecret(botEnv).catch(()=>null);
+  if(!expectedSecret || request.headers.get('X-Telegram-Bot-Api-Secret-Token')!==expectedSecret)
     return new Response('Forbidden',{status:403});
-  }
   let update;
   try{update=await request.json();}catch{return new Response('OK');}
-  // Never handle channel_post or group messages; this prevents feedback loops.
+  // Never process channel_post or group updates; no feedback loops.
   const message=update?.message;
-  if(!message || message.chat?.type!=='private' || !message.from?.id)
+  if(!message||message.chat?.type!=='private'||!message.from?.id)
     return new Response('OK');
-
-  const userId=String(message.from.id);
-  const chatId=String(message.chat.id);
+  const userId=String(message.from.id), chatId=String(message.chat.id);
   const text=String(message.text||message.caption||'');
-  if(/^\/id(?:@\w+)?$/iu.test(text.trim())) {
-    await tellOwner(env,chatId,'🆔 Ваш Telegram ID: <code>'+userId+'</code>');
+  if(text.trim()==='/id' || text.trim().startsWith('/id@')) {
+    await tellOwner(botEnv,chatId,'🆔 Ваш Telegram ID: <code>'+userId+'</code>');
     return new Response('OK');
   }
-  if(!env.ADMIN_TELEGRAM_ID || userId!==String(env.ADMIN_TELEGRAM_ID))
-    return new Response('OK');
-
-  const schedule=parseForwardedGroup22(text,now);
-  if(!schedule) {
-    if(text && !text.startsWith('/')) {
-      await tellOwner(env,chatId,
-        '⚠️ Не знайшов підтверджений графік 2.2 на сьогодні або завтра. '+
-        'Перешли текст із датою, заголовком «Підгрупа 2.2 відключення:» '+
-        'і точними інтервалами.');
+  const isAdmin=!!env.ADMIN_TELEGRAM_ID&&userId===String(env.ADMIN_TELEGRAM_ID);
+  // Preserve owner-forwarded 2.2 schedules before personal menu handling.
+  if(scope==='plaza'&&isAdmin){
+    const schedule=parseForwardedGroup22(text,now);
+    if(schedule){
+      if(!env.SCHEDULE_STATE)throw new Error('SCHEDULE_STATE binding unavailable');
+      const response=await publisherStub(env).fetch('https://state.internal/publish',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(schedule)
+      });
+      const result=await response.json();
+      if(result.status==='published')
+        await tellOwner(env,chatId,'✅ Опублікував підгрупу 2.2 за '+schedule.date+
+          ' у канал. Це новий допис №'+result.messageId+'.');
+      else if(result.status==='unchanged')
+        await tellOwner(env,chatId,
+          'ℹ️ Графік 2.2 за '+schedule.date+' не змінився. Повторно не публікую.');
+      else if(result.status==='awaiting-source-sync')
+        await tellOwner(env,chatId,'ℹ️ Очікую оновлення автоматичного джерела.');
+      else await tellOwner(env,chatId,
+        '⚠️ Не вдалося підтвердити публікацію ('+
+          String(result.status||'error')+'). Перевір канал і логи.');
+      return new Response('OK');
     }
+  }
+  if(await privateMenu(env,scope,userId,chatId,text,now))
     return new Response('OK');
-  }
-  if(!env.SCHEDULE_STATE)throw new Error('SCHEDULE_STATE binding unavailable');
-  const stub=env.SCHEDULE_STATE.get(env.SCHEDULE_STATE.idFromName('confirmed-2.2'));
-  const response=await stub.fetch('https://state.internal/publish',{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(schedule)
-  });
-  const result=await response.json();
-  if(result.status==='published') {
+  // Never publish arbitrary private messages; only owner can forward valid schedules.
+  if(scope==='plaza'&&isAdmin&&text&&!text.startsWith('/'))
     await tellOwner(env,chatId,
-      '✅ Опублікував підгрупу 2.2 за '+schedule.date+
-      ' у канал. Це новий допис №'+result.messageId+'.');
-  } else if(result.status==='unchanged'){
-    await tellOwner(env,chatId,
-      'ℹ️ Графік 2.2 за '+schedule.date+' не змінився. Повторно не публікую.');
-  } else if(result.status==='awaiting-source-sync') {
-    await tellOwner(env,chatId,'ℹ️ Очікую оновлення автоматичного джерела.');
-  } else {
-    await tellOwner(env,chatId,
-      '⚠️ Не вдалося надійно підтвердити публікацію ('+
-      String(result.status||'error')+'). Перевір канал і логи перед повтором.');
-  }
+      '⚠️ Не знайшов підтверджений графік 2.2 на сьогодні або завтра. '+
+      'Перешли текст із датою, заголовком «Підгрупа 2.2 відключення:» і точними інтервалами.');
   return new Response('OK');
 }
 
@@ -260,7 +361,9 @@ export default {
     const pathname=new URL(request.url).pathname;
     if(pathname==='/setup' && request.method==='GET')
       return renderBrowserSetupPage();
-    if(pathname==='/setup' && request.method==='POST') {
+    if(pathname==='/setup-dtek' && request.method==='GET')
+      return renderDtekSetupPage();
+    if(['/setup','/setup-dtek'].includes(pathname) && request.method==='POST') {
       // Require owner-defined Cloudflare SETUP_KEY before exposing bot details
       // or transferring an existing webhook. Never accept target URLs.
       let payload;
@@ -278,11 +381,12 @@ export default {
       const origin=request.headers.get('Origin');
       if(origin && origin!==new URL(request.url).origin)
         return Response.json({status:'forbidden'}, {status:403});
+      const setupEnv=pathname==='/setup-dtek'?dtekEnv(env):env;
       let result;
       if(payload?.mode==='inspect') {
-        result=await inspectOwnWebhook(request,env);
+        result=await inspectOwnWebhook(request,setupEnv);
       } else if(payload?.mode==='connect' && payload?.acceptTransfer===true) {
-        result=await installOwnWebhook(request,env,{
+        result=await installOwnWebhook(request,setupEnv,{
           allowTransfer:true,
           expectedBotUsername:payload?.botUsername,
           expectedWebhookFingerprint:payload?.webhookFingerprint
@@ -296,9 +400,11 @@ export default {
         headers:{'Cache-Control':'no-store'}
       });
     }
-    if(request.method!=='POST' || !['/','/telegram'].includes(pathname))
+    if(request.method!=='POST' || !['/','/telegram','/telegram/dtek'].includes(pathname))
       return new Response('OK');
-    try{return await handleTelegramWebhook(request,env);}
+    try{return await handleTelegramWebhook(request,env,{
+      scope:pathname==='/telegram/dtek'?'dtek':'plaza'
+    });}
     catch(error) {
       console.error('Telegram manual fallback error: '+String(error?.message||error));
       // Telegram retries if non-200; DO dedup still blocks repeats.
