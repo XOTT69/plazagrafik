@@ -189,7 +189,7 @@ async function tellOwner(env,chatId,text) {
 
 /** Telegram secret-header + sender-ID checks block forged and public posts. */
 export async function handleTelegramWebhook(request,env,{now=new Date()}={}) {
-  const expectedSecret=await resolvedWebhookSecret(env);
+  const expectedSecret=await resolvedWebhookSecret(env).catch(()=>null);
   if(request.headers.get('X-Telegram-Bot-Api-Secret-Token')!==expectedSecret) {
     return new Response('Forbidden',{status:403});
   }
