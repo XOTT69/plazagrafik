@@ -306,3 +306,110 @@ test('manual first, unknown old auto snapshot never triggers a wrong duplicate',
   assert.equal(await p([[0,60]],'auto'),'awaiting-source-sync');
   assert.equal(await p([[0,120]],'auto'),'unchanged');
 });
+
+test('formats distinct initial/updated headlines for today and tomorrow',()=>{
+  const today='2026-10-17',tomorrow='2026-10-18';
+  const periods=[[900,1140]];
+  const header=(date,updated)=>format22(date,periods,{today,updated}).split('\n')[0];
+  assert.equal(header(today,false),'💡 <b>Графік відключення світла</b>');
+  assert.equal(header(today,true),'💡 <b>Оновлений графік відключення світла</b>');
+  assert.equal(header(tomorrow,false),'💡 <b>Графік відключення світла на завтра</b>');
+  assert.equal(header(tomorrow,true),'💡 <b>Оновлений графік відключення світла на завтра</b>');
+  assert.match(format22(tomorrow,periods,{today}),/Неділя, 18\.10\.2026/);
+});
+
+test('today: first schedule, later change and unchanged hours get the correct title with no duplicates',async()=>{
+  const calls=[],store=storage(),today='2026-10-17';
+  let id=100;
+  const object=new Group22Publisher({storage:store},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'@plazakvartal_svitlo',
+    TEST_FETCH:async(_url,opts)=>{
+      calls.push(JSON.parse(opts.body));
+      return reply({ok:true,result:{message_id:id++}});
+    }
+  },()=>new Date('2026-10-17T08:00:00Z'));
+  const post=async (periods,source='auto')=>{
+    const resp=await object.fetch(new Request('https://state.internal/publish',{
+      method:'POST',body:JSON.stringify({
+        date:today,periods,source,
+        text:format22(today,periods,{today})
+      })
+    }));
+    return (await resp.json()).status;
+  };
+  const a=[[0,60],[900,1140]],b=[[0,60],[900,1200]];
+  assert.equal(await post(a),'published');
+  assert.match(calls[0].text,/^💡 <b>Графік відключення світла<\/b>/);
+  assert.equal(await post(a),'unchanged');
+  assert.equal(await post(b),'published');
+  assert.match(calls[1].text,/^💡 <b>Оновлений графік відключення світла<\/b>/);
+  assert.equal(await post(b),'unchanged');
+  assert.equal(await post(b,'manual'),'unchanged');
+  assert.equal(calls.length,2);
+  assert.equal(store.data.get('date:'+today).revision,2);
+});
+
+test('tomorrow: revisions say tomorrow; day rollover alone never reposts',async()=>{
+  const date='2026-10-18',calls=[],store=storage();
+  let now=new Date('2026-10-17T18:00:00Z'),id=200;
+  const object=new Group22Publisher({storage:store},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'@plazakvartal_svitlo',
+    TEST_FETCH:async(_url,opts)=>{
+      calls.push(JSON.parse(opts.body));
+      return reply({ok:true,result:{message_id:id++}});
+    }
+  },()=>now);
+  const post=async (periods,source='auto')=>{
+    const resp=await object.fetch(new Request('https://state.internal/publish',{
+      method:'POST',body:JSON.stringify({
+        date,periods,source,text:format22(date,periods,{today:'2026-10-17'})
+      })
+    }));
+    return (await resp.json()).status;
+  };
+  const a=[[360,510]],b=[[360,540]],c=[[390,540]];
+  assert.equal(await post(a),'published');
+  assert.match(calls[0].text,/^💡 <b>Графік відключення світла на завтра<\/b>/);
+  assert.equal(await post(a),'unchanged');
+  assert.equal(await post(b),'published');
+  assert.match(calls[1].text,/^💡 <b>Оновлений графік відключення світла на завтра<\/b>/);
+  assert.equal(await post(b,'manual'),'unchanged');
+  // 22:30 UTC is 01:30 the next day in Kyiv.
+  now=new Date('2026-10-17T22:30:00Z');
+  assert.equal(await post(b),'unchanged');
+  assert.equal(calls.length,2);
+  assert.equal(await post(c),'published');
+  assert.match(calls[2].text,/^💡 <b>Оновлений графік відключення світла<\/b>/);
+  assert.doesNotMatch(calls[2].text,/на завтра/);
+  assert.equal(await post(c),'unchanged');
+  assert.equal(calls.length,3);
+});
+
+test('a pre-existing published message counts as a revision and does not repost unchanged',async()=>{
+  const store=storage(),texts=[];
+  const old=[[0,60]],revised=[[0,90]];
+  await store.put('date:'+DATE,{
+    status:'published',messageId:80,revision:1,
+    fingerprint:scheduleFingerprint(DATE,old),
+    text:format22(DATE,old,{today:DATE})
+  });
+  const object=new Group22Publisher({storage:store},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'-100123',
+    TEST_FETCH:async(_url,opts)=>{
+      texts.push(JSON.parse(opts.body).text);
+      return reply({ok:true,result:{message_id:81}});
+    }
+  },()=>new Date('2026-10-17T08:00:00Z'));
+  const post=async(periods)=>{
+    const res=await object.fetch(new Request('https://state.internal/publish',{
+      method:'POST',body:JSON.stringify({
+        date:DATE,periods,text:format22(DATE,periods,{today:DATE})
+      })
+    }));
+    return (await res.json()).status;
+  };
+  assert.equal(await post(old),'unchanged');
+  assert.equal(await post(revised),'published');
+  assert.match(texts[0],/^💡 <b>Оновлений графік відключення світла<\/b>/);
+  assert.equal(texts.length,1);
+});

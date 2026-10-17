@@ -64,11 +64,15 @@ export function emergencyWarning(status) {
       'Погодинний графік на зазначених територіях не діє.':
       'Можливі відключення поза графіком.');
 }
-export function format22(date,periods,{today,emergency=null}={}) {
-  // Absolute date prevents a "tomorrow -> today" label change from
-  // looking like a real timetable update or leaving a stale relative label.
+export function format22(date,periods,{today,updated=false,emergency=null}={}) {
+  // A relative heading describes when the message was originally published.
+  // The explicit calendar date stays visible; the fingerprint is based only
+  // on date and intervals, so midnight never creates another announcement.
+  const heading=(updated?'Оновлений графік':'Графік')+
+    ' відключення світла'+
+    (today && date===nextDate(today)?' на завтра':'');
   const lines=[
-    '💡 <b>Графік відключення світла</b>',
+    '💡 <b>'+heading+'</b>',
     '📆 <b>'+safe(humanDate(date))+'</b>',
     '',
     '💡<b>Підгрупа 2.2 відключення:</b>'
