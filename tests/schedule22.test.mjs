@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {confirmed22,choosePosts,format22,kyivDate,validatedPeriods,emergencyWarning,SOURCE_URL,scheduleFingerprint,scheduleFingerprintFromText} from '../src/schedule22.js';
-import {Group22Publisher,checkDtekAndPublish} from '../src/index.js';
+import {Group22Publisher,checkDtekAndPublish,handleTelegramWebhook} from '../src/index.js';
+import {parseForwardedGroup22} from '../src/manual-forward.js';
 
 const DATE='2026-10-17';
 const GROUPS=Array.from({length:6},(_,i)=>[String(i+1)+'.1',String(i+1)+'.2']).flat();
@@ -54,13 +55,21 @@ test('timezone selects today and tomorrow only for confirmed days',()=>{
   assert.deepEqual(posts[0].periods,[[0,60],[900,1140]]);
   assert.match(SOURCE_URL,/XOTT69\/dtek/);
 });
-test('ignores any manual Telegram webhook post',async()=>{
+test('private webhook without Telegram shared secret is rejected',async()=>{
   const {default:worker}=await import('../src/index.js');
-  const response=await worker.fetch(new Request('https://example.workers.dev/telegram',{
-    method:'POST',body:JSON.stringify({channel_post:{text:'💡 Графік 2.2'}})
-  }),{BOT_TOKEN:'x',CHANNEL_ID:'y'});
-  assert.equal(response.status,200);
-  assert.equal(await response.text(),'OK');
+  const request=new Request('https://example.workers.dev/telegram',{
+    method:'POST',body:JSON.stringify({message:{chat:{type:'private',id:1},from:{id:1},text:'bad'}})
+  });
+  assert.equal((await worker.fetch(request,{BOT_TOKEN:'x',CHANNEL_ID:'y'})).status,403);
+});
+test('signed channel posts never trigger re-publication loops',async()=>{
+  const {default:worker}=await import('../src/index.js');
+  const request=new Request('https://example.workers.dev/telegram',{
+    method:'POST',
+    headers:{'X-Telegram-Bot-Api-Secret-Token':'secret'},
+    body:JSON.stringify({channel_post:{text:'💡 Графік 2.2'}})
+  });
+  assert.equal((await worker.fetch(request,{WEBHOOK_SECRET:'secret',BOT_TOKEN:'x',CHANNEL_ID:'y'})).status,200);
 });
 test('new post on a real 2.2 change; identical data or text-only changes do nothing',async()=>{
   const calls=[];
@@ -173,4 +182,127 @@ test('cron reads confirmed feed and passes it to persistent publisher',async()=>
   assert.equal(posted.length,1);
   assert.equal(result[0].status,'published');
   assert.equal(posted[0].date,DATE);
+});
+
+
+test('admin can forward a real dated 12-group message; parses only 2.2',()=>{
+  const text=[
+    '💡Оновлений графік відключення світла на сьогодні.',
+    '📆Субота, 17.10.2026',
+    '💡Підгрупа 1.2 відключення:',
+    '❌з 06:00 до 08:30 (2.5 год)',
+    '⚫ Разом без світла: 2.5 год',
+    '💡Підгрупа 2.2 відключення:',
+    '❌з 00:00 до 01:00 (1.0 год)',
+    '❌з 15:00 до 19:00 (4.0 год)',
+    '⚫ Разом без світла: 5.0 год',
+    '💡Підгрупа 3.1 відключення:',
+    '❌з 05:00 до 07:00'
+  ].join('\n');
+  const post=parseForwardedGroup22(text,new Date('2026-10-17T07:00:00Z'));
+  assert.equal(post.date,DATE);
+  assert.deepEqual(post.periods,[[0,60],[900,1140]]);
+  assert.match(post.text,/Підгрупа 2.2 відключення/);
+  assert.doesNotMatch(post.text,/06:00 до 08:30/);
+  assert.equal(post.source,'manual');
+});
+test('manual forward parser ignores stale, undated, overlapping or irrelevant messages',()=>{
+  const now=new Date('2026-10-17T08:00:00Z');
+  const message=(date,body)=>[
+    '📆'+date, '💡Підгрупа 2.2 відключення:',...body
+  ].join('\n');
+  assert.equal(parseForwardedGroup22(message('16.10.2026',['❌з 03:00 до 05:00']),now),null);
+  assert.equal(parseForwardedGroup22(message('31.02.2026',['❌з 03:00 до 05:00']),now),null);
+  assert.equal(parseForwardedGroup22('Підгрупа 2.2 відключення:\n❌з 03:00 до 05:00',now),null);
+  assert.equal(parseForwardedGroup22(message('17.10.2026',[
+    '❌з 03:00 до 05:00','❌з 04:30 до 06:30'
+  ]),now),null);
+  assert.equal(parseForwardedGroup22('📆17.10.2026\nЗмінено підгрупи: 2.2',now),null);
+  const empty=parseForwardedGroup22(
+    message('17.10.2026',['✅ Відключень за графіком немає.']),now);
+  assert.deepEqual(empty.periods,[]);
+});
+test('only signed private messages from admin can submit manual schedule',async()=>{
+  const posts=[],replies=[];
+  const env={
+    BOT_TOKEN:'fake',CHANNEL_ID:'-100123',WEBHOOK_SECRET:'safe-telegram',
+    ADMIN_TELEGRAM_ID:'100',
+    SCHEDULE_STATE:{idFromName:()=>1,get:()=>({
+      fetch:async(_url,options)=>{
+        posts.push(JSON.parse(options.body));
+        return reply({status:'published',messageId:55});
+      }
+    })},
+    TEST_FETCH:async(_url,options)=>{
+      replies.push(JSON.parse(options.body));
+      return reply({ok:true,result:{message_id:999}});
+    }
+  };
+  const payload=id=>new Request('https://plazagrafik.workers.dev/telegram',{
+    method:'POST',
+    headers:{'X-Telegram-Bot-Api-Secret-Token':'safe-telegram'},
+    body:JSON.stringify({message:{
+      chat:{id,type:'private'},from:{id},
+      text:'📆Субота, 17.10.2026\nПідгрупа 2.2 відключення:\n❌з 15:00 до 19:00'
+    }})
+  });
+  const now=new Date('2026-10-17T07:00:00Z');
+  assert.equal((await handleTelegramWebhook(payload(101),env,{now})).status,200);
+  assert.equal(posts.length,0);
+  assert.equal((await handleTelegramWebhook(payload(100),env,{now})).status,200);
+  assert.equal(posts.length,1);
+  assert.deepEqual(posts[0].periods,[[900,1140]]);
+  assert.equal(replies[0].chat_id,'100');
+  assert.match(replies[0].text,/Опублікував/);
+  const unsigned=new Request('https://plazagrafik.workers.dev/telegram',{
+    method:'POST',body:JSON.stringify({message:{chat:{type:'private',id:100},from:{id:100}}})
+  });
+  assert.equal((await handleTelegramWebhook(unsigned,env,{now})).status,403);
+});
+
+test('manual early update does not bounce back to cached older automatic schedule',async()=>{
+  const calls=[],store=storage();
+  let messageId=51;
+  const botFetch=async(_url,opts)=>{
+    calls.push(JSON.parse(opts.body));
+    return reply({ok:true,result:{message_id:messageId++}});
+  };
+  const object=new Group22Publisher({storage:store},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'-100123',TEST_FETCH:botFetch
+  });
+  const publish=async(periods,source)=>{
+    const res=await object.fetch(new Request('https://state.internal/publish',{
+      method:'POST',body:JSON.stringify({
+        date:DATE,periods,source,text:format22(DATE,periods,{today:DATE})
+      })
+    }));
+    return (await res.json()).status;
+  };
+  const old=[[0,60]],forwarded=[[0,90]],newer=[[0,120]];
+  assert.equal(await publish(old,'auto'),'published');
+  assert.equal(await publish(forwarded,'manual'),'published');
+  assert.equal(await publish(old,'auto'),'awaiting-source-sync');
+  assert.equal(calls.length,2);
+  assert.equal(await publish(forwarded,'auto'),'unchanged');
+  assert.equal(await publish(newer,'auto'),'published');
+  assert.equal(calls.length,3);
+});
+
+test('manual first, unknown old auto snapshot never triggers a wrong duplicate',async()=>{
+  const store=storage();
+  const object=new Group22Publisher({storage:store},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'-100123',
+    TEST_FETCH:async()=>reply({ok:true,result:{message_id:51}})
+  });
+  const p=async(periods,source)=>{
+    const res=await object.fetch(new Request('https://state.internal/publish',{
+      method:'POST',body:JSON.stringify({date:DATE,periods,source,
+        text:format22(DATE,periods,{today:DATE})})
+    }));
+    return (await res.json()).status;
+  };
+  assert.equal(await p([[0,120]],'manual'),'published');
+  assert.equal(await p([[0,60]],'auto'),'awaiting-source-sync');
+  assert.equal(await p([[0,60]],'auto'),'awaiting-source-sync');
+  assert.equal(await p([[0,120]],'auto'),'unchanged');
 });
