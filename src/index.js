@@ -240,7 +240,7 @@ async function privateMenu(env,scope,userId,chatId,text,now){
     value==='↩️ Меню'||value==='🏠 Моя підгрупа'||
     value==='⚙️ Налаштування'||value==='❓ Допомога'||
     (scope==='dtek' && (/^🏘 [1-6]\\.[12]$/.test(value) ||
-      /^\\/group [1-6]\\.[12]$/.test(value)));
+      value.startsWith('/group ')));
   if(!isChoice && !DATA_COMMANDS.has(value))return false;
   if(!env.SCHEDULE_STATE)throw new Error('SCHEDULE_STATE binding unavailable');
   const stub=publisherStub(env);
@@ -315,7 +315,7 @@ export async function handleTelegramWebhook(request,env,{now=new Date(),scope='p
     return new Response('OK');
   const userId=String(message.from.id), chatId=String(message.chat.id);
   const text=String(message.text||message.caption||'');
-  if(/^\\/id(?:@\\w+)?$/iu.test(text.trim())) {
+  if(text.trim()==='/id' || text.trim().startsWith('/id@')) {
     await tellOwner(botEnv,chatId,'🆔 Ваш Telegram ID: <code>'+userId+'</code>');
     return new Response('OK');
   }
