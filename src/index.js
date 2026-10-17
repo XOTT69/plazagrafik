@@ -239,7 +239,7 @@ async function privateMenu(env,scope,userId,chatId,text,now){
   const isChoice=value==='/start'||value==='/menu'||value==='/help'||
     value==='↩️ Меню'||value==='🏠 Моя підгрупа'||
     value==='⚙️ Налаштування'||value==='❓ Допомога'||
-    (scope==='dtek' && (/^🏘 [1-6]\\.[12]$/.test(value) ||
+    (scope==='dtek' && (value.startsWith('🏘 ') ||
       value.startsWith('/group ')));
   if(!isChoice && !DATA_COMMANDS.has(value))return false;
   if(!env.SCHEDULE_STATE)throw new Error('SCHEDULE_STATE binding unavailable');
