@@ -72,24 +72,17 @@ Cloudflare Worker для окремого Telegram-каналу, визначе�
    символи A-Z, a-z, 0-9, `-`, `_` (можна створити `openssl rand -hex 24`).
    Якщо `BOT_TOKEN` / `CHANNEL_ID` уже збережені в Worker, повторно
    їх задавати не потрібно.
-6. У результаті `npm run deploy` знайдіть реальну адресу Worker,
-   наприклад `https://plazagrafik.<ваш-піддомен>.workers.dev`.
-   Перевірте, що Telegram `getWebhookInfo` відповідає за цей самий бот,
-   потім встановіть webhook на адресу `/telegram` і **той самий секрет**:
+6. Після деплою Wrangler покаже адресу Worker виду
+   `https://plazagrafik.<ваш-піддомен>.workers.dev`.
+   Запустіть:
 
    ```bash
-   read -s -p 'Telegram bot token: ' TOKEN; echo
-   read -s -p 'Webhook secret: ' SECRET; echo
-   curl -sS -X POST "https://api.telegram.org/bot${TOKEN}/setWebhook" \\
-      --data-urlencode "url=https://plazagrafik.<ваш-піддомен>.workers.dev/telegram" \\
-      --data-urlencode "secret_token=${SECRET}" \\
-      --data-urlencode 'allowed_updates=["message"]'
-   unset TOKEN SECRET
+   npm run setup-webhook
    ```
 
-   На macOS `read -s -p` може не працювати: в такому разі введіть
-   `read -s TOKEN; echo` та `read -s SECRET; echo` окремо, без показу
-   секретів. **Не надсилайте токени в чат.**
+   Скрипт попросить адресу Worker, токен Telegram і той самий
+   `WEBHOOK_SECRET`, покаже стару адресу webhook та запитає підтвердження,
+   перш ніж змінювати її на `/telegram`. Не надсилайте секрети в чат.
 7. Дочекайтеся наступної перевірки. У логах: `npx wrangler tail`.
    Для резервної перевірки перешліть із власного Telegram акаунта боту
    датований графік 2.2 в **особисті повідомлення**.
