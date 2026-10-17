@@ -2,6 +2,11 @@ name = "plazagrafik"
 main = "src/index.js"
 compatibility_date = "2026-01-12"
 
+# Keep Cloudflare Dashboard runtime variables and secrets on GitHub deploy.
+# BOT_TOKEN and other sensitive values must be set as Secrets in Cloudflare;
+# never copy the dashboard-generated [vars] snippet with tokens into GitHub.
+keep_vars = true
+
 # Run every five minutes. Webhook posts are ignored to prevent copies
 # when an admin posts to the channel manually.
 [triggers]
