@@ -7,8 +7,8 @@ compatibility_date = "2026-01-12"
 [triggers]
 crons = ["*/5 * * * *"]
 
-# Persistent per-day Telegram message IDs: new day -> new post,
-# changed hours -> edit the existing message, never duplicate.
+# Persistent last-confirmed timetable per date: first fact -> one post,
+# later real changes -> new posts; unchanged time windows -> no duplicates.
 [[durable_objects.bindings]]
 name = "SCHEDULE_STATE"
 class_name = "Group22Publisher"

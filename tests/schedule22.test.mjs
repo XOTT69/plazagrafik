@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {confirmed22,choosePosts,format22,kyivDate,validatedPeriods,emergencyWarning,SOURCE_URL} from '../src/schedule22.js';
+import {confirmed22,choosePosts,format22,kyivDate,validatedPeriods,emergencyWarning,SOURCE_URL,scheduleFingerprint,scheduleFingerprintFromText} from '../src/schedule22.js';
 import {Group22Publisher,checkDtekAndPublish} from '../src/index.js';
 
 const DATE='2026-10-17';
@@ -39,7 +39,8 @@ test('formats Telegram-compatible 2.2 schedule and emergency caveat',()=>{
   assert.match(text,/❌з 00:00 до 01:00 \(1\.0 год\)/);
   assert.match(text,/❌з 15:00 до 19:00 \(4\.0 год\)/);
   assert.match(text,/Разом без світла: 5\.0 год/);
-  assert.match(text,/Бучанський район/);
+  assert.match(text,/Під час екстрених відключень/);
+  assert.doesNotMatch(text,/Бучанський район/);
   assert.doesNotMatch(text,/Підгрупа 1\.2/);
   assert.match(emergencyWarning({active:true,kind:'аварійні',districts:[]}),/поза графіком/);
 });
@@ -49,7 +50,8 @@ test('timezone selects today and tomorrow only for confirmed days',()=>{
   const posts=choosePosts(feed(),now);
   assert.equal(posts.length,1);
   assert.equal(posts[0].date,DATE);
-  assert.match(posts[0].text,/на сьогодні/);
+  assert.match(posts[0].text,/Графік відключення світла/);
+  assert.deepEqual(posts[0].periods,[[0,60],[900,1140]]);
   assert.match(SOURCE_URL,/XOTT69\/dtek/);
 });
 test('ignores any manual Telegram webhook post',async()=>{
@@ -60,35 +62,59 @@ test('ignores any manual Telegram webhook post',async()=>{
   assert.equal(response.status,200);
   assert.equal(await response.text(),'OK');
 });
-test('one post per date, same ID edited on a real schedule change',async()=>{
+test('new post on a real 2.2 change; identical data or text-only changes do nothing',async()=>{
   const calls=[];
+  let index=85;
   const testFetch=async(url,request)=>{
-    const path=String(url).split('/').pop();
-    const payload=JSON.parse(request.body);
-    calls.push([path,payload]);
-    if(path==='sendMessage')return reply({ok:true,result:{message_id:85}});
-    if(path==='editMessageText')return reply({ok:true,result:{message_id:85}});
-    throw Error(path);
+    const method=String(url).split('/').pop(),payload=JSON.parse(request.body);
+    calls.push([method,payload]);
+    assert.equal(method,'sendMessage');
+    return reply({ok:true,result:{message_id:index++}});
   };
   const state={storage:storage()};
   const object=new Group22Publisher(state,{
     BOT_TOKEN:'fake',CHANNEL_ID:'-100123',TEST_FETCH:testFetch
   });
-  const post=async text=>{
+  const post=async (periods,text)=>{
     const response=await object.fetch(new Request('https://state.internal/publish',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({date:DATE,text})
+      body:JSON.stringify({date:DATE,periods,text})
     }));
     return response.json();
   };
-  const a=format22(DATE,[[0,60]],{today:DATE});
-  const b=format22(DATE,[[0,120]],{today:DATE});
-  assert.equal((await post(a)).status,'published');
-  assert.equal((await post(a)).status,'unchanged');
-  assert.equal((await post(b)).status,'edited');
-  assert.deepEqual(calls.map(x=>x[0]),['sendMessage','editMessageText']);
-  assert.equal(calls[1][1].message_id,85);
+  const a=[[0,60]], b=[[0,120]];
+  const original=format22(DATE,a,{today:DATE});
+  const revised=format22(DATE,b,{today:DATE});
+  assert.equal((await post(a,original)).messageId,85);
+  assert.equal((await post(a,original+'  ')).status,'unchanged');
+  assert.equal((await post(b,revised)).messageId,86);
+  assert.equal((await post(b,revised)).status,'unchanged');
+  assert.deepEqual(calls.map(x=>x[0]),['sendMessage','sendMessage']);
+  assert.equal(state.storage.data.get('date:'+DATE).revision,2);
 });
+
+test('existing edited-day record migrates without sending duplicate on deployment',async()=>{
+  let calls=0;
+  const data=storage(), periods=[[0,60]];
+  await data.put('date:'+DATE,{
+    status:'published',messageId:99,text:format22(DATE,periods,{today:DATE})
+  });
+  const object=new Group22Publisher({storage:data},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'-100123',
+    TEST_FETCH:async()=>{calls++;return reply({ok:true,result:{message_id:15}});}
+  });
+  const response=await object.fetch(new Request('https://state.internal/publish',{
+    method:'POST',body:JSON.stringify({
+      date:DATE,periods,text:format22(DATE,periods,{today:DATE})
+    })
+  }));
+  assert.equal((await response.json()).status,'unchanged');
+  assert.equal(calls,0);
+  assert.equal(data.data.get('date:'+DATE).fingerprint,scheduleFingerprint(DATE,periods));
+  assert.equal(scheduleFingerprintFromText(DATE,format22(DATE,periods,{today:DATE})),
+    scheduleFingerprint(DATE,periods));
+});
+
 test('parallel cron calls do not send duplicates',async()=>{
   let sends=0;
   const object=new Group22Publisher({storage:storage()},{
@@ -97,7 +123,7 @@ test('parallel cron calls do not send duplicates',async()=>{
   });
   const message=format22(DATE,[[0,60]],{today:DATE});
   const send=()=>object.fetch(new Request('https://state.internal/publish',{
-    method:'POST',body:JSON.stringify({date:DATE,text:message})
+    method:'POST',body:JSON.stringify({date:DATE,periods:[[0,60]],text:message})
   }));
   const results=await Promise.all([send(),send(),send()]);
   assert.equal(sends,1);
@@ -112,7 +138,7 @@ test('network failure leaves pending state rather than risking a duplicate',asyn
   });
   const text=format22(DATE,[[0,60]],{today:DATE});
   const send=()=>object.fetch(new Request('https://state.internal/publish',{
-    method:'POST',body:JSON.stringify({date:DATE,text})
+    method:'POST',body:JSON.stringify({date:DATE,periods:[[0,60]],text})
   }));
   assert.equal((await (await send()).json()).status,'error');
   assert.equal((await (await send()).json()).status,'pending');
@@ -127,7 +153,7 @@ test('definite Telegram 403 is retried on a later run after permissions fixed',a
   });
   const text=format22(DATE,[[0,60]],{today:DATE});
   const send=()=>object.fetch(new Request('https://state.internal/publish',{
-    method:'POST',body:JSON.stringify({date:DATE,text})
+    method:'POST',body:JSON.stringify({date:DATE,periods:[[0,60]],text})
   }));
   assert.equal((await (await send()).json()).status,'error');
   assert.equal((await (await send()).json()).status,'published');

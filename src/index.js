@@ -1,4 +1,7 @@
-import {SOURCE_URL,choosePosts} from './schedule22.js';
+import {
+  SOURCE_URL,choosePosts,validatedPeriods,
+  scheduleFingerprint,scheduleFingerprintFromText
+} from './schedule22.js';
 
 const TG_BASE='https://api.telegram.org/bot';
 const DAY=/^\d{4}-\d{2}-\d{2}$/;
@@ -30,8 +33,9 @@ async function telegramCall(env,method,data,fetchFn=fetch) {
 
 /**
  * SQLite-backed Durable Object (Cloudflare Workers Free compatible).
- * Records the Telegram message ID per *calendar date*. Later revisions and
- * the tomorrow->today transition edit that exact message in place.
+ * Stores the most recently announced confirmed timetable per calendar date.
+ * A new confirmed timetable sends a new unpinned message, never edits a post.
+ * Repeated cron runs or status/formatting-only changes produce no duplicates.
  *
  * The old webhook no longer republishes a channel message. Only the cron
  * trigger calls this object with confirmed daily DTEK source content.
@@ -48,55 +52,67 @@ export class Group22Publisher {
     const task=async()=>{
       let payload;
       try {payload=await request.json();} catch{return Response.json({status:'invalid'}, {status:400});}
+      const periods=validatedPeriods(payload?.periods);
       if(!DAY.test(payload?.date||'')||
+        periods===null ||
         typeof payload.text!=='string'||!payload.text||
         payload.text.length>POST_MAX_LENGTH ||
         !payload.text.includes('Підгрупа 2.2 відключення:')) {
         return Response.json({status:'invalid'}, {status:400});
       }
       const key='date:'+payload.date;
+      const fingerprint=scheduleFingerprint(payload.date,periods);
       const previous=await this.ctx.storage.get(key);
-      if(previous?.text===payload.text && previous?.messageId)
-        return Response.json({status:'unchanged'});
-      if(previous?.status==='pending' && !previous?.messageId) {
-        // The original send may have succeeded, but the response was lost.
-        // Never risk a duplicate send; operator can reconcile the message ID.
+      // Timetable versions, NOT text changes, control the notification.
+      // This also handles state left by the old edit-in-place publisher.
+      const knownFingerprint=previous?.fingerprint ||
+        scheduleFingerprintFromText(payload.date,previous?.text);
+      if(previous?.pending || previous?.status==='pending') {
+        // The new send may have reached Telegram even if its response
+        // was lost. A human must reconcile before safely retrying.
         return Response.json({status:'pending',reason:'delivery outcome unknown'});
       }
-      if(previous?.messageId) {
-        // If the post was deleted, fail safely: don't publish a replacement.
-        await telegramCall(this.env,'editMessageText',{
-          message_id:previous.messageId,text:payload.text
-        },this.env.TEST_FETCH||fetch);
-        await this.ctx.storage.put(key,{
-          ...previous,text:payload.text,status:'published',
-          editedAt:new Date().toISOString()
+      if(knownFingerprint===fingerprint && previous?.messageId) {
+        // Migrate an older per-day record without a canonical fingerprint.
+        if(!previous.fingerprint)await this.ctx.storage.put(key,{
+          ...previous,fingerprint
         });
-        return Response.json({status:'edited',messageId:previous.messageId});
+        return Response.json({status:'unchanged',messageId:previous.messageId});
       }
-      // Persist BEFORE sending. If the Telegram call times out after a
-      // successful send, later crons must not generate a second message.
+      // Keep the last confirmed version while marking this proposed revision
+      // pending. If Telegram definitively rejects, restore it for retry.
       await this.ctx.storage.put(key,{
-        status:'pending',text:payload.text,startedAt:new Date().toISOString()
+        ...previous,
+        pending:{fingerprint,startedAt:new Date().toISOString()}
       });
       let sent;
       try {
         sent=await telegramCall(this.env,'sendMessage',{
           text:payload.text,disable_notification:false
         },this.env.TEST_FETCH||fetch);
-      }catch(err) {
-        // A definitive 4xx response means Telegram did not accept this send;
-        // retry on a later cron once permissions or rate limit recover.
-        if(err.status>=400 && err.status<500)await this.ctx.storage.delete(key);
+      } catch(err) {
+        // Explicit 4xx means Telegram did not accept this particular send.
+        // Preserve the previously successful revision, if one exists.
+        if(err.status>=400 && err.status<500) {
+          if(previous)await this.ctx.storage.put(key,previous);
+          else await this.ctx.storage.delete(key);
+        }
         throw err;
       }
       if(!Number.isSafeInteger(sent?.message_id) || sent.message_id<1)
         throw new Error('Telegram delivery uncertain: no message_id returned');
+      const revision=(Number(previous?.revision)||0)+1;
       await this.ctx.storage.put(key,{
-        status:'published',text:payload.text,messageId:sent.message_id,
+        fingerprint,
+        text:payload.text,
+        messageId:sent.message_id,
+        status:'published',
+        revision,
         publishedAt:new Date().toISOString()
       });
-      return Response.json({status:'published',messageId:sent.message_id});
+      return Response.json({
+        status:'published',messageId:sent.message_id,revision
+      });
     };
     // Explicit in-instance serialization plus persisted pending marker protect
     // against parallel cron runs and state races.
