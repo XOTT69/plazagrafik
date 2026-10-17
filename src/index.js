@@ -3,7 +3,7 @@ import {
   scheduleFingerprint,scheduleFingerprintFromText
 } from './schedule22.js';
 import {parseForwardedGroup22} from './manual-forward.js';
-import {resolvedWebhookSecret,installOwnWebhook,renderBrowserSetupPage} from './webhook-setup.js';
+import {resolvedWebhookSecret,installOwnWebhook,inspectOwnWebhook,validateSetupKey,renderBrowserSetupPage} from './webhook-setup.js';
 
 const TG_BASE='https://api.telegram.org/bot';
 const DAY=/^\d{4}-\d{2}-\d{2}$/;
@@ -252,13 +252,38 @@ export default {
     if(pathname==='/setup' && request.method==='GET')
       return renderBrowserSetupPage();
     if(pathname==='/setup' && request.method==='POST') {
-      // An idempotent, same-origin-only installer. Does not accept external
-      // URLs or return token values and cannot hijack another webhook.
-      const result=await installOwnWebhook(request,env);
+      // Require owner-defined Cloudflare SETUP_KEY before exposing bot details
+      // or transferring an existing webhook. Never accept target URLs.
+      let payload;
+      try{payload=await request.json();}
+      catch{return Response.json({status:'invalid'}, {status:400});}
+      if(!env.SETUP_KEY || String(env.SETUP_KEY).length<24)
+        return Response.json({
+          status:'configuration-required',
+          reason:'Create a Cloudflare Secret named SETUP_KEY (24+ characters) before continuing.'
+        },{status:400,headers:{'Cache-Control':'no-store'}});
+      if(!await validateSetupKey(env,payload?.setupKey))
+        return Response.json({status:'unauthorized',reason:'Invalid setup key'},
+          {status:403,headers:{'Cache-Control':'no-store'}});
+      // Browser POSTs must originate from the same Worker domain.
+      const origin=request.headers.get('Origin');
+      if(origin && origin!==new URL(request.url).origin)
+        return Response.json({status:'forbidden'}, {status:403});
+      let result;
+      if(payload?.mode==='inspect') {
+        result=await inspectOwnWebhook(request,env);
+      } else if(payload?.mode==='connect' && payload?.acceptTransfer===true) {
+        result=await installOwnWebhook(request,env,{
+          allowTransfer:true,
+          expectedBotUsername:payload?.botUsername,
+          expectedWebhookFingerprint:payload?.webhookFingerprint
+        });
+      } else return Response.json({status:'invalid'}, {status:400});
       return Response.json(result,{
-        status:result.status==='connected'?200:
+        status:result.status==='connected'||result.status==='ready'?200:
           result.status==='conflict'?409:
-          result.status==='configuration-required'?400:502,
+          result.status==='configuration-required'?400:
+          result.status==='confirmation-required'?422:502,
         headers:{'Cache-Control':'no-store'}
       });
     }
