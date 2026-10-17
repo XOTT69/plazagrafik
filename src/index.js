@@ -1,5 +1,5 @@
 import {
-  SOURCE_URL,choosePosts,validatedPeriods,format22,kyivDate,
+  SOURCE_URL,choosePosts,validatedPeriods,format22,kyivDate,nextDate,
   scheduleFingerprint,scheduleFingerprintFromText
 } from './schedule22.js';
 import {parseForwardedGroup22} from './manual-forward.js';
@@ -235,6 +235,13 @@ const DATA_COMMANDS=new Set([
   '/today','/graph','/tomorrow','/now','/next','/stats','/history'
 ]);
 async function privateMenu(env,scope,userId,chatId,text,now){
+  const value=text.trim();
+  const isChoice=value==='/start'||value==='/menu'||value==='/help'||
+    value==='↩️ Меню'||value==='🏠 Моя підгрупа'||
+    value==='⚙️ Налаштування'||value==='❓ Допомога'||
+    (scope==='dtek' && (/^🏘 [1-6]\\.[12]$/.test(value) ||
+      /^\\/group [1-6]\\.[12]$/.test(value)));
+  if(!isChoice && !DATA_COMMANDS.has(value))return false;
   if(!env.SCHEDULE_STATE)throw new Error('SCHEDULE_STATE binding unavailable');
   const stub=publisherStub(env);
   const saved=await stub.fetch('https://state.internal/profile',{
