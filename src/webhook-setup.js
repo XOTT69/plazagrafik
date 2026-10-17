@@ -105,22 +105,22 @@ export async function installOwnWebhook(request,env,{
     const secret=await resolvedWebhookSecret(env);
     const info=await telegram(env,'getWebhookInfo',{},fetchFn);
     const current=String(info?.url??'');
+    if(allowTransfer){
+      // Always prove bot identity and old state before connecting a webhook,
+      // including on a new bot with no current webhook or the same endpoint.
+      const bot=await telegram(env,'getMe',{},fetchFn);
+      const confirmed=String(expectedBotUsername).replace(/^@/,'').toLowerCase();
+      if(!bot?.is_bot || !confirmed || confirmed!==String(bot.username??'').toLowerCase())
+        return {status:'confirmation-required',reason:'Telegram bot username confirmation does not match'};
+      if((await webhookFingerprint(current))!==expectedWebhookFingerprint)
+        return {status:'conflict',reason:'Existing webhook changed; inspect again before transferring'};
+    }
     if(current){
       let previous;
       try{previous=new URL(current);}
       catch{return {status:'conflict',reason:'Existing Telegram webhook address is invalid'};}
-      if(previous.origin!==new URL(target).origin){
-        if(!allowTransfer)
-          return {status:'conflict',reason:'This bot token already has a different webhook address'};
-        // Verify Telegram bot identity and that the existing webhook has not
-        // changed between inspection and owner's explicit confirmation.
-        const bot=await telegram(env,'getMe',{},fetchFn);
-        const confirmed=String(expectedBotUsername).replace(/^@/,'').toLowerCase();
-        if(!bot?.is_bot || !confirmed || confirmed!==String(bot.username??'').toLowerCase())
-          return {status:'confirmation-required',reason:'Telegram bot username confirmation does not match'};
-        if((await webhookFingerprint(current))!==expectedWebhookFingerprint)
-          return {status:'conflict',reason:'Existing webhook changed; inspect again before transferring'};
-      }
+      if(previous.origin!==new URL(target).origin&&!allowTransfer)
+        return {status:'conflict',reason:'This bot token already has a different webhook address'};
     }
     await telegram(env,'setWebhook',{
       url:target,secret_token:secret,allowed_updates:['message'],
