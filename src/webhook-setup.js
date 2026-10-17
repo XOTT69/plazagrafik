@@ -2,7 +2,8 @@
  * Browser-only Telegram webhook setup.
  * The setup endpoint only points the Telegram bot at the same deployed
  * plazagrafik workers.dev origin and never a user-provided destination.
- * It refuses to replace a webhook owned by another service.
+ * Replacing a different webhook requires authenticated, explicit confirmation
+ * of the existing bot username and current webhook snapshot.
  */
 async function telegram(env,method,params={},fetchFn=fetch) {
   const token=String(env?.BOT_TOKEN??'');
@@ -37,7 +38,64 @@ export function workerWebhookUrl(request) {
     throw new Error('Open /setup on the deployed plazagrafik workers.dev domain');
   return url.origin+'/telegram';
 }
-export async function installOwnWebhook(request,env,{fetchFn=fetch}={}) {
+
+async function webhookFingerprint(url) {
+  const data=new TextEncoder().encode(String(url??''));
+  const hash=await crypto.subtle.digest('SHA-256',data);
+  return [...new Uint8Array(hash)].map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+/** A Cloudflare Secret, never a public Telegram user ID, gates setup actions. */
+export async function validateSetupKey(env,provided) {
+  const secret=String(env?.SETUP_KEY??'');
+  const candidate=String(provided??'');
+  if(secret.length<24||secret.length>256||candidate.length>256||!candidate)
+    return false;
+  const encode=new TextEncoder();
+  const [a,b]=await Promise.all([
+    crypto.subtle.digest('SHA-256',encode.encode(secret)),
+    crypto.subtle.digest('SHA-256',encode.encode(candidate))
+  ]);
+  const x=new Uint8Array(a),y=new Uint8Array(b);
+  let difference=0;
+  for(let i=0;i<x.length;i++)difference|=x[i]^y[i];
+  return difference===0;
+}
+
+/** Read-only inspection after setup-key authentication, token never exposed. */
+export async function inspectOwnWebhook(request,env,{fetchFn=fetch}={}) {
+  try {
+    const target=workerWebhookUrl(request);
+    if(!/^\d{4,16}$/.test(String(env?.ADMIN_TELEGRAM_ID??'')))
+      return {status:'configuration-required',reason:'Set ADMIN_TELEGRAM_ID in Cloudflare'};
+    if(!String(env?.CHANNEL_ID??'').trim())
+      return {status:'configuration-required',reason:'Set CHANNEL_ID in Cloudflare'};
+    await resolvedWebhookSecret(env);
+    const bot=await telegram(env,'getMe',{},fetchFn);
+    const info=await telegram(env,'getWebhookInfo',{},fetchFn);
+    if(!bot?.is_bot || !/^[A-Za-z0-9_]{5,32}$/.test(String(bot.username??'')))
+      return {status:'error',reason:'Telegram did not return a valid bot username'};
+    const current=String(info?.url??'');
+    let host='Не налаштовано';
+    if(current){
+      try {host=new URL(current).host;}
+      catch {return {status:'error',reason:'Invalid existing Telegram webhook URL'};}
+    }
+    return {
+      status:'ready',botUsername:'@'+bot.username,
+      currentWebhookHost:host,
+      alreadyConnected:current===target,
+      webhookFingerprint:await webhookFingerprint(current)
+    };
+  } catch(error){
+    return {status:'error',reason:String(error?.message||error)};
+  }
+}
+
+export async function installOwnWebhook(request,env,{
+  fetchFn=fetch,allowTransfer=false,expectedBotUsername='',
+  expectedWebhookFingerprint=''
+}={}) {
   try {
     if(!/^\d{4,16}$/.test(String(env?.ADMIN_TELEGRAM_ID??'')))
       return {status:'configuration-required',reason:'Set ADMIN_TELEGRAM_ID in Cloudflare → Worker → Settings → Variables and Secrets'};
@@ -49,9 +107,20 @@ export async function installOwnWebhook(request,env,{fetchFn=fetch}={}) {
     const current=String(info?.url??'');
     if(current){
       let previous;
-      try{previous=new URL(current);}catch{return {status:'conflict',reason:'An existing Telegram webhook has an invalid address; inspect it first'};}
-      if(previous.origin!==new URL(target).origin)
-        return {status:'conflict',reason:'This bot token already uses another webhook address. Review the existing integration before replacing it.'};
+      try{previous=new URL(current);}
+      catch{return {status:'conflict',reason:'Existing Telegram webhook address is invalid'};}
+      if(previous.origin!==new URL(target).origin){
+        if(!allowTransfer)
+          return {status:'conflict',reason:'This bot token already has a different webhook address'};
+        // Verify Telegram bot identity and that the existing webhook has not
+        // changed between inspection and owner's explicit confirmation.
+        const bot=await telegram(env,'getMe',{},fetchFn);
+        const confirmed=String(expectedBotUsername).replace(/^@/,'').toLowerCase();
+        if(!bot?.is_bot || !confirmed || confirmed!==String(bot.username??'').toLowerCase())
+          return {status:'confirmation-required',reason:'Telegram bot username confirmation does not match'};
+        if((await webhookFingerprint(current))!==expectedWebhookFingerprint)
+          return {status:'conflict',reason:'Existing webhook changed; inspect again before transferring'};
+      }
     }
     await telegram(env,'setWebhook',{
       url:target,secret_token:secret,allowed_updates:['message'],
