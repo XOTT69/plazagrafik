@@ -24,7 +24,7 @@ if [[ -z "$TOKEN" || ! "$SECRET" =~ ^[A-Za-z0-9_-]{1,256}$ ]]; then
 fi
 echo
 echo "Поточний webhook для вказаного токена:"
-curl --fail-with-body -sS "https://api.telegram.org/bot$TOKEN/getWebhookInfo"
+curl -f -sS "https://api.telegram.org/bot$TOKEN/getWebhookInfo"
 echo
 echo
 echo "УВАГА: Telegram дозволяє лише один webhook на один токен."
@@ -35,7 +35,7 @@ if [[ "$CONFIRM" != "yes" ]]; then
   exit 0
 fi
 
-curl --fail-with-body -sS -X POST "https://api.telegram.org/bot$TOKEN/setWebhook" \
+curl -f -sS -X POST "https://api.telegram.org/bot$TOKEN/setWebhook" \
   --data-urlencode "url=$WEBHOOK_URL" \
   --data-urlencode "secret_token=$SECRET" \
   --data-urlencode 'allowed_updates=["message"]'
