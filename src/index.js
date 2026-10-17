@@ -1,119 +1,146 @@
-// --- ДОПОМІЖНІ ФУНКЦІЇ ---
+import {SOURCE_URL,choosePosts} from './schedule22.js';
 
-function calculateDuration(start, end) {
-  try {
-    const [sh, sm] = start.split(":").map(Number);
-    const [eh, em] = end.split(":").map(Number);
-    let diff = (eh * 60 + em) - (sh * 60 + sm);
-    if (diff < 0) diff += 24 * 60; // перехід через добу
-    return diff;
-  } catch {
-    return 0;
+const TG_BASE='https://api.telegram.org/bot';
+const DAY=/^\d{4}-\d{2}-\d{2}$/;
+const POST_MAX_LENGTH=4000;
+
+async function telegramCall(env,method,data,fetchFn=fetch) {
+  if(!env.BOT_TOKEN||!env.CHANNEL_ID) {
+    throw new Error('BOT_TOKEN and CHANNEL_ID must be configured in Cloudflare');
   }
-}
-
-function processLinesWithHours(lines) {
-  let totalMinutes = 0;
-  const processedLines = lines.map(line => {
-    // Шукаємо час у форматі 00:00-00:00 або з 00:00 до 00:00
-    return line.replace(/(\d{2}:\d{2})\s*(?:-|–|до)\s*(\d{2}:\d{2})/gi, (match, start, end) => {
-      const minutes = calculateDuration(start, end);
-      if (minutes > 0) {
-        totalMinutes += minutes;
-        return `${match} (${(minutes / 60).toFixed(1)} год)`;
-      }
-      return match;
-    });
+  const response=await fetchFn(TG_BASE+env.BOT_TOKEN+'/'+method,{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      chat_id:env.CHANNEL_ID,
+      parse_mode:'HTML',
+      disable_web_page_preview:true,
+      ...data
+    }),
+    signal:AbortSignal.timeout(16000)
   });
-
-  const totalHours = (totalMinutes / 60).toFixed(1);
-  if (totalHours > 0) {
-    processedLines.push(`\n⚫ Разом без світла: ${totalHours} год`);
+  const json=await response.json();
+  if(!response.ok||!json?.ok) {
+    const err=new Error('Telegram '+method+': HTTP '+response.status+' '+String(json?.description||'unknown'));
+    err.status=response.status;
+    throw err;
   }
-  return processedLines.join('\n');
+  return json.result;
 }
 
-// --- ГОЛОВНИЙ ПАРСЕР ---
-
-function parseSchedule(text) {
-  const lines = text.split('\n');
-  const header = [];
-  const body = [];
-  
-  let found22 = false;
-
-  // 1. Витягуємо шапку (перші 2-3 рядки, де є текст або дати)
-  for (let i = 0; i < Math.min(lines.length, 5); i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    // Якщо це опис групи - шапка закінчилась
-    if (line.match(/група|черга|підгрупа/i)) break;
-    header.push(line);
+/**
+ * SQLite-backed Durable Object (Cloudflare Workers Free compatible).
+ * Records the Telegram message ID per *calendar date*. Later revisions and
+ * the tomorrow->today transition edit that exact message in place.
+ *
+ * The old webhook no longer republishes a channel message. Only the cron
+ * trigger calls this object with confirmed daily DTEK source content.
+ */
+export class Group22Publisher {
+  constructor(ctx,env) {
+    this.ctx=ctx;
+    this.env=env;
+    this.queue=Promise.resolve();
   }
-
-  // 2. Шукаємо 2.2 і читаємо до наступної групи
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-
-    // ПЕРЕВІРКА НА СТАРТ: чи є тут 2.2?
-    if (line.match(/2\.2/)) {
-      found22 = true;
-      body.push(line); // Додаємо заголовок групи
-      continue;
-    }
-
-    if (found22) {
-      // ПЕРЕВІРКА НА СТОП: чи це початок іншої групи?
-      // Шукаємо 1.x, 3.x, 4.x, 5.x, 6.x або слова "Група/Черга/Всі інші"
-      if (line.match(/(?:^|\s)(1\.|3\.|4\.|5\.|6\.|✅|єСвітло|Для всіх)/)) {
-        break; // Зупиняємось, далі чужий графік
+  async fetch(request) {
+    if(new URL(request.url).pathname!=='/publish'||request.method!=='POST')
+      return new Response('Not found',{status:404});
+    const task=async()=>{
+      let payload;
+      try {payload=await request.json();} catch{return Response.json({status:'invalid'}, {status:400});}
+      if(!DAY.test(payload?.date||'')||
+        typeof payload.text!=='string'||!payload.text||
+        payload.text.length>POST_MAX_LENGTH ||
+        !payload.text.includes('Підгрупа 2.2 відключення:')) {
+        return Response.json({status:'invalid'}, {status:400});
       }
-      // Якщо це не нова група - додаємо рядок собі
-      body.push(line);
+      const key='date:'+payload.date;
+      const previous=await this.ctx.storage.get(key);
+      if(previous?.text===payload.text && previous?.messageId)
+        return Response.json({status:'unchanged'});
+      if(previous?.status==='pending' && !previous?.messageId) {
+        // The original send may have succeeded, but the response was lost.
+        // Never risk a duplicate send; operator can reconcile the message ID.
+        return Response.json({status:'pending',reason:'delivery outcome unknown'});
+      }
+      if(previous?.messageId) {
+        // If the post was deleted, fail safely: don't publish a replacement.
+        await telegramCall(this.env,'editMessageText',{
+          message_id:previous.messageId,text:payload.text
+        },this.env.TEST_FETCH||fetch);
+        await this.ctx.storage.put(key,{
+          ...previous,text:payload.text,status:'published',
+          editedAt:new Date().toISOString()
+        });
+        return Response.json({status:'edited',messageId:previous.messageId});
+      }
+      // Persist BEFORE sending. If the Telegram call times out after a
+      // successful send, later crons must not generate a second message.
+      await this.ctx.storage.put(key,{
+        status:'pending',text:payload.text,startedAt:new Date().toISOString()
+      });
+      let sent;
+      try {
+        sent=await telegramCall(this.env,'sendMessage',{
+          text:payload.text,disable_notification:false
+        },this.env.TEST_FETCH||fetch);
+      }catch(err) {
+        // A definitive 4xx response means Telegram did not accept this send;
+        // retry on a later cron once permissions or rate limit recover.
+        if(err.status>=400 && err.status<500)await this.ctx.storage.delete(key);
+        throw err;
+      }
+      if(!Number.isSafeInteger(sent?.message_id) || sent.message_id<1)
+        throw new Error('Telegram delivery uncertain: no message_id returned');
+      await this.ctx.storage.put(key,{
+        status:'published',text:payload.text,messageId:sent.message_id,
+        publishedAt:new Date().toISOString()
+      });
+      return Response.json({status:'published',messageId:sent.message_id});
+    };
+    // Explicit in-instance serialization plus persisted pending marker protect
+    // against parallel cron runs and state races.
+    const result=this.queue.then(task);
+    this.queue=result.then(()=>{},()=>{});
+    try {return await result;}
+    catch(error){console.error('Group 2.2 Telegram error:',error.message);
+      return Response.json({status:'error',error:String(error.message)}, {status:502});
     }
   }
-
-  if (!found22) return null; // Не знайшли 2.2
-
-  // 3. Формуємо результат
-  const headerText = header.join('\n');
-  const bodyText = processLinesWithHours(body);
-
-  return `${headerText}\n\n${bodyText}`;
 }
 
-// --- ОБРОБНИК ЗАПИТІВ ---
+export async function checkDtekAndPublish(env,{fetchFn=fetch,now=new Date()}={}) {
+  if(!env.SCHEDULE_STATE)throw new Error('Missing SCHEDULE_STATE durable object binding');
+  const response=await fetchFn(SOURCE_URL,{
+    headers:{Accept:'application/json','Cache-Control':'no-cache'},
+    signal:AbortSignal.timeout(12000)
+  });
+  if(!response.ok)throw new Error('DTEK confirmed feed HTTP '+response.status);
+  const data=await response.json();
+  const posts=choosePosts(data,now);
+  const stub=env.SCHEDULE_STATE.get(env.SCHEDULE_STATE.idFromName('confirmed-2.2'));
+  const results=[];
+  for(const post of posts) {
+    const res=await stub.fetch('https://state.internal/publish',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(post)
+    });
+    const outcome=await res.json();
+    if(!res.ok)console.error('Group 2.2 post failed for '+post.date+': '+outcome.error);
+    results.push({date:post.date,...outcome});
+  }
+  return results;
+}
 
 export default {
-  async fetch(request, env) {
-    if (request.method !== "POST") return new Response("OK");
-
-    try {
-      const update = await request.json();
-      const msg = update.message || update.channel_post;
-      
-      if (!msg || (!msg.text && !msg.caption)) return new Response("OK");
-
-      const text = msg.text || msg.caption;
-      const responseText = parseSchedule(text);
-
-      if (responseText) {
-        await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: env.CHANNEL_ID,
-            text: responseText,
-            disable_web_page_preview: true
-          })
-        });
-      }
-
-    } catch (e) {
-      console.error("Error:", e);
-    }
-
-    return new Response("OK");
+  // Telegram can keep its webhook pointed here; incoming channel messages
+  // are intentionally ignored. No copies of manual publications are sent.
+  async fetch() {
+    return new Response('OK');
+  },
+  async scheduled(_event,env,ctx) {
+    ctx.waitUntil(checkDtekAndPublish(env).then(results=>{
+      console.log('Confirmed DTEK 2.2 cron:',JSON.stringify(results));
+    }).catch(error=>console.error('Group 2.2 cron failed:',error.message)));
   }
 };
