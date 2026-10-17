@@ -3,6 +3,7 @@ import {
   scheduleFingerprint,scheduleFingerprintFromText
 } from './schedule22.js';
 import {parseForwardedGroup22} from './manual-forward.js';
+import {resolvedWebhookSecret,installOwnWebhook,renderBrowserSetupPage} from './webhook-setup.js';
 
 const TG_BASE='https://api.telegram.org/bot';
 const DAY=/^\d{4}-\d{2}-\d{2}$/;
@@ -188,8 +189,8 @@ async function tellOwner(env,chatId,text) {
 
 /** Telegram secret-header + sender-ID checks block forged and public posts. */
 export async function handleTelegramWebhook(request,env,{now=new Date()}={}) {
-  if(!env.WEBHOOK_SECRET ||
-    request.headers.get('X-Telegram-Bot-Api-Secret-Token')!==env.WEBHOOK_SECRET) {
+  const expectedSecret=await resolvedWebhookSecret(env).catch(()=>null);
+  if(!expectedSecret || request.headers.get('X-Telegram-Bot-Api-Secret-Token')!==expectedSecret) {
     return new Response('Forbidden',{status:403});
   }
   let update;
@@ -248,6 +249,19 @@ export default {
   // private admin chat, never a channel_post or a public group message.
   async fetch(request,env) {
     const pathname=new URL(request.url).pathname;
+    if(pathname==='/setup' && request.method==='GET')
+      return renderBrowserSetupPage();
+    if(pathname==='/setup' && request.method==='POST') {
+      // An idempotent, same-origin-only installer. Does not accept external
+      // URLs or return token values and cannot hijack another webhook.
+      const result=await installOwnWebhook(request,env);
+      return Response.json(result,{
+        status:result.status==='connected'?200:
+          result.status==='conflict'?409:
+          result.status==='configuration-required'?400:502,
+        headers:{'Cache-Control':'no-store'}
+      });
+    }
     if(request.method!=='POST' || !['/','/telegram'].includes(pathname))
       return new Response('OK');
     try{return await handleTelegramWebhook(request,env);}
