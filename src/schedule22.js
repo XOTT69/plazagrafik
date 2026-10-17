@@ -68,11 +68,12 @@ export function format22(date,periods,{today,updated=false,emergency=null}={}) {
   // A relative heading describes when the message was originally published.
   // The explicit calendar date stays visible; the fingerprint is based only
   // on date and intervals, so midnight never creates another announcement.
+  const tomorrow=today && date===nextDate(today);
   const heading=(updated?'Оновлений графік':'Графік')+
-    ' відключення світла'+
-    (today && date===nextDate(today)?' на завтра':'');
+    ' відключення світла'+(tomorrow?' на завтра':'');
+  const icon=updated?'🔄':tomorrow?'📅':'💡';
   const lines=[
-    '💡 <b>'+heading+'</b>',
+    icon+' <b>'+heading+'</b>',
     '📆 <b>'+safe(humanDate(date))+'</b>',
     '',
     '💡<b>Підгрупа 2.2 відключення:</b>'

@@ -312,9 +312,9 @@ test('formats distinct initial/updated headlines for today and tomorrow',()=>{
   const periods=[[900,1140]];
   const header=(date,updated)=>format22(date,periods,{today,updated}).split('\n')[0];
   assert.equal(header(today,false),'💡 <b>Графік відключення світла</b>');
-  assert.equal(header(today,true),'💡 <b>Оновлений графік відключення світла</b>');
-  assert.equal(header(tomorrow,false),'💡 <b>Графік відключення світла на завтра</b>');
-  assert.equal(header(tomorrow,true),'💡 <b>Оновлений графік відключення світла на завтра</b>');
+  assert.equal(header(today,true),'🔄 <b>Оновлений графік відключення світла</b>');
+  assert.equal(header(tomorrow,false),'📅 <b>Графік відключення світла на завтра</b>');
+  assert.equal(header(tomorrow,true),'🔄 <b>Оновлений графік відключення світла на завтра</b>');
   assert.match(format22(tomorrow,periods,{today}),/Неділя, 18\.10\.2026/);
 });
 
@@ -342,7 +342,7 @@ test('today: first schedule, later change and unchanged hours get the correct ti
   assert.match(calls[0].text,/^💡 <b>Графік відключення світла<\/b>/);
   assert.equal(await post(a),'unchanged');
   assert.equal(await post(b),'published');
-  assert.match(calls[1].text,/^💡 <b>Оновлений графік відключення світла<\/b>/);
+  assert.match(calls[1].text,/^🔄 <b>Оновлений графік відключення світла<\/b>/);
   assert.equal(await post(b),'unchanged');
   assert.equal(await post(b,'manual'),'unchanged');
   assert.equal(calls.length,2);
@@ -369,17 +369,17 @@ test('tomorrow: revisions say tomorrow; day rollover alone never reposts',async(
   };
   const a=[[360,510]],b=[[360,540]],c=[[390,540]];
   assert.equal(await post(a),'published');
-  assert.match(calls[0].text,/^💡 <b>Графік відключення світла на завтра<\/b>/);
+  assert.match(calls[0].text,/^📅 <b>Графік відключення світла на завтра<\/b>/);
   assert.equal(await post(a),'unchanged');
   assert.equal(await post(b),'published');
-  assert.match(calls[1].text,/^💡 <b>Оновлений графік відключення світла на завтра<\/b>/);
+  assert.match(calls[1].text,/^🔄 <b>Оновлений графік відключення світла на завтра<\/b>/);
   assert.equal(await post(b,'manual'),'unchanged');
   // 22:30 UTC is 01:30 the next day in Kyiv.
   now=new Date('2026-10-17T22:30:00Z');
   assert.equal(await post(b),'unchanged');
   assert.equal(calls.length,2);
   assert.equal(await post(c),'published');
-  assert.match(calls[2].text,/^💡 <b>Оновлений графік відключення світла<\/b>/);
+  assert.match(calls[2].text,/^🔄 <b>Оновлений графік відключення світла<\/b>/);
   assert.doesNotMatch(calls[2].text,/на завтра/);
   assert.equal(await post(c),'unchanged');
   assert.equal(calls.length,3);
@@ -410,6 +410,6 @@ test('a pre-existing published message counts as a revision and does not repost 
   };
   assert.equal(await post(old),'unchanged');
   assert.equal(await post(revised),'published');
-  assert.match(texts[0],/^💡 <b>Оновлений графік відключення світла<\/b>/);
+  assert.match(texts[0],/^🔄 <b>Оновлений графік відключення світла<\/b>/);
   assert.equal(texts.length,1);
 });
