@@ -1,5 +1,5 @@
 import {
-  SOURCE_URL,choosePosts,validatedPeriods,
+  SOURCE_URL,choosePosts,validatedPeriods,format22,kyivDate,
   scheduleFingerprint,scheduleFingerprintFromText
 } from './schedule22.js';
 import {parseForwardedGroup22} from './manual-forward.js';
@@ -44,9 +44,10 @@ async function telegramCall(env,method,data,fetchFn=fetch) {
  * snapshot until the official feed catches up or genuinely changes.
  */
 export class Group22Publisher {
-  constructor(ctx,env) {
+  constructor(ctx,env,clock=()=>new Date()) {
     this.ctx=ctx;
     this.env=env;
+    this.clock=clock;
     this.queue=Promise.resolve();
   }
   async fetch(request) {
@@ -104,6 +105,14 @@ export class Group22Publisher {
         });
         return Response.json({status:'unchanged',messageId:previous.messageId});
       }
+      // Render only after deduplication: prior successful publication decides
+      // whether this is a new or updated schedule, and current Kyiv date
+      // decides whether it is for tomorrow. Neither changes the fingerprint.
+      const postText=format22(payload.date,periods,{
+        today:kyivDate(this.clock()),updated:Boolean(previous?.messageId)
+      });
+      if(postText.length>POST_MAX_LENGTH)
+        return Response.json({status:'invalid'}, {status:400});
       // Keep the last confirmed version while marking this proposed revision
       // pending. If Telegram definitively rejects, restore it for retry.
       await this.ctx.storage.put(key,{
@@ -113,7 +122,7 @@ export class Group22Publisher {
       let sent;
       try {
         sent=await telegramCall(this.env,'sendMessage',{
-          text:payload.text,disable_notification:false
+          text:postText,disable_notification:false
         },this.env.TEST_FETCH||fetch);
       } catch(err) {
         // Explicit 4xx means Telegram did not accept this particular send.
@@ -129,7 +138,7 @@ export class Group22Publisher {
       const revision=(Number(previous?.revision)||0)+1;
       await this.ctx.storage.put(key,{
         fingerprint,
-        text:payload.text,
+        text:postText,
         ...(source==='auto'?{
           lastAutoFingerprint:fingerprint,manualHold:null
         }:{
