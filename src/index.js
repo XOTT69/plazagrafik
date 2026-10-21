@@ -161,9 +161,26 @@ export class Group22Publisher {
       // This also handles state left by the old edit-in-place publisher.
       const knownFingerprint=previous?.fingerprint ||
         scheduleFingerprintFromText(payload.date,previous?.text);
-      if(previous?.pending || previous?.status==='pending') {
-        // The new send may have reached Telegram even if its response
-        // was lost. A human must reconcile before safely retrying.
+      // Only the signed owner command can acknowledge a missing Telegram post.
+      // Match the exact pending attempt and verified schedule before one retry.
+      // Cron and /sync22 never carry this recovery acknowledgment.
+      const recovery=payload.recovery;
+      const recovering=recovery?.confirmedMissing===true;
+      if(recovery!==undefined) {
+        const startedAt=String(recovery?.pendingSince||'');
+        const startedMs=Date.parse(startedAt);
+        if(!recovering || !previous?.pending ||
+          previous.pending.startedAt!==startedAt ||
+          previous.pending.fingerprint!==fingerprint ||
+          !Number.isFinite(startedMs) ||
+          Date.now()-startedMs<60_000) {
+          return Response.json({status:'recovery-refused',
+            reason:'Pending attempt changed, is too recent, or schedule differs'});
+        }
+      }
+      if((previous?.pending || previous?.status==='pending')&&!recovering) {
+        // Delivery was uncertain. Only a date-specific, owner-confirmed
+        // recovery can bypass this protection; no automated duplicates.
         return Response.json({status:'pending',reason:'delivery outcome unknown'});
       }
       // When a manual forward outruns the cached public DTEK snapshot,
@@ -485,6 +502,84 @@ export async function handleTelegramWebhook(request,env,{now=new Date(),scope='p
     }
     rows.push('\n🔄 /sync22 — безпечно перевірити й опублікувати тільки графік на завтра, якщо немає дубля.');
     await tellOwner(env,chatId,rows.join('\n'));
+    return new Response('OK');
+  }
+
+  // Recover a blocked pending send ONLY after the owner has checked
+  // the destination channel and explicitly confirmed the post is absent.
+  const recoveryCommand=/^\/recover22(?:@\w+)?(?:\s+(\d{4}-\d{2}-\d{2})(?:\s+(CONFIRM))?)?$/i.exec(text.trim());
+  if(scope==='plaza'&&isAdmin&&recoveryCommand) {
+    const date=recoveryCommand[1],confirmed=Boolean(recoveryCommand[2]);
+    const allowed=[kyivDate(now),nextDate(kyivDate(now))];
+    if(!date||!allowed.includes(date)) {
+      await tellOwner(env,chatId,
+        '⚠️ Формат: <code>/recover22 РРРР-ММ-ДД</code>. Доступні лише сьогодні та завтра.');
+      return new Response('OK');
+    }
+    if(!env.SCHEDULE_STATE) {
+      await tellOwner(env,chatId,'❌ Немає SCHEDULE_STATE у Cloudflare.');
+      return new Response('OK');
+    }
+    const stub=publisherStub(env);
+    const response=await stub.fetch('https://state.internal/status',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({date})
+    });
+    if(!response.ok)throw Error('Cannot read pending publication');
+    const state=await response.json();
+    if(state.status!=='pending'||!state.startedAt) {
+      await tellOwner(env,chatId,
+        'ℹ️ Для '+date+' немає незавершеної публікації. Стан: <b>'+
+        String(state.status||'unknown')+'</b>. Перевір /status22.');
+      return new Response('OK');
+    }
+    if(!confirmed) {
+      await tellOwner(env,chatId,
+        '⚠️ <b>Відновлення графіка 2.2 за '+date+'</b>\n\n'+
+        'Спершу перевір канал <b>'+
+        String(env.CHANNEL_ID||'Плаза').replace(/&/g,'&amp;').replace(/</g,'&lt;')+
+        '</b>: повідомлення за цю дату справді НЕМАЄ.\n\n'+
+        'Тільки після перевірки надішли:\n'+
+        '<code>/recover22 '+date+' CONFIRM</code>\n\n'+
+        'Можливий дубль, якщо Telegram фактично прийняв старе повідомлення.');
+      return new Response('OK');
+    }
+    const fetchFn=env.TEST_SOURCE_FETCH||fetch;
+    const feedResponse=await fetchFn(SOURCE_URL+'?recovery='+encodeURIComponent(String(now.getTime())),{
+      headers:{Accept:'application/json','Cache-Control':'no-cache'},
+      cache:'no-store',signal:AbortSignal.timeout(12000)
+    });
+    if(!feedResponse.ok) {
+      await tellOwner(env,chatId,'❌ Джерело ДТЕК недоступне. Відновлення не виконано.');
+      return new Response('OK');
+    }
+    const post=choosePosts(await feedResponse.json(),now).find(p=>p.date===date);
+    if(!post) {
+      await tellOwner(env,chatId,'❌ Немає повного підтвердженого графіка на '+date+'.');
+      return new Response('OK');
+    }
+    const sent=await stub.fetch('https://state.internal/publish',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({...post,source:'auto',recovery:{
+        confirmedMissing:true,pendingSince:state.startedAt
+      }})
+    });
+    const outcome=await sent.json();
+    if(outcome.status==='published') {
+      await tellOwner(env,chatId,'✅ Відновлено публікацію 2.2 на '+date+
+        ' у '+String(env.CHANNEL_ID||'канал')+
+        '. Telegram підтвердив повідомлення №'+outcome.messageId+'.');
+    } else {
+      const explanations={
+        'recovery-refused':'Стан або години змінилися, повтор заблоковано.',
+        pending:'Telegram знову не підтвердив відправку; автоматичний повтор заблоковано.',
+        unchanged:'Цей графік уже збережений як опублікований.',
+        error:'Не вдалося підтвердити доставку. Перевір логи та канал.'
+      };
+      await tellOwner(env,chatId,'⚠️ Відновлення '+date+': <b>'+
+        String(outcome.status||'error')+'</b>\n'+
+        (explanations[outcome.status]||'Перевір /status22 та канал.'));
+    }
     return new Response('OK');
   }
 

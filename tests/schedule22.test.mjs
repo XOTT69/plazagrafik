@@ -506,3 +506,84 @@ test('admin /sync22 respects already pending Telegram sends and never retries bl
   assert.match(botMessages[0].text,/Потрібна перевірка у групі/);
   assert.match(botMessages[0].text,/автоматичний повтор заблоковано/);
 });
+
+test('pending recovery requires exact previous attempt, identical fact and minimum age',async()=>{
+  const date='2026-10-22',periods=[[630,870],[1260,1320]];
+  let sends=0;
+  const store=storage(),key='date:'+date;
+  const object=new Group22Publisher({storage:store},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'-100123',
+    TEST_FETCH:async()=>{sends++;return reply({ok:true,result:{message_id:300+sends}})}
+  });
+  const published=async(extra={})=>(await (await object.fetch(new Request(
+    'https://state.internal/publish',{method:'POST',body:JSON.stringify({
+      date,periods,text:format22(date,periods),source:'auto',...extra
+    })}))).json());
+  const old=new Date(Date.now()-180000).toISOString();
+  await store.put(key,{pending:{fingerprint:scheduleFingerprint(date,periods),startedAt:old}});
+  assert.equal((await published()).status,'pending');
+  assert.equal((await published({recovery:{confirmedMissing:true,pendingSince:'wrong'}})).status,'recovery-refused');
+  assert.equal((await published({recovery:{confirmedMissing:true,pendingSince:old},
+    periods:[[630,900]]})).status,'recovery-refused');
+  assert.equal(sends,0);
+  const a=await published({recovery:{confirmedMissing:true,pendingSince:old}});
+  assert.equal(a.status,'published');
+  assert.equal(a.messageId,301);
+  assert.equal(sends,1);
+  assert.equal((await published({recovery:{confirmedMissing:true,pendingSince:old}})).status,'recovery-refused');
+  assert.equal((await published()).status,'unchanged');
+  assert.equal(sends,1,'repeated confirmation and cron never send duplicates');
+});
+
+test('only signed Plaza owner can recover missing 22 October timetable after confirmation',async()=>{
+  const date='2026-10-22',now=new Date('2026-10-21T18:20:00Z');
+  const periods=[[630,870],[1260,1320]],feedData={
+    confirmedSchedules:{[date]:Object.fromEntries(
+      GROUPS.map(g=>[g,g==='2.2'?periods:[]]))}
+  };
+  const store=storage(),startedAt=new Date(Date.now()-180000).toISOString();
+  await store.put('date:'+date,{pending:{
+    fingerprint:scheduleFingerprint(date,periods),startedAt
+  }});
+  const calls=[];
+  const publisher=new Group22Publisher({storage:store},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'@plazakvartal_svitlo',
+    TEST_FETCH:async(_url,opts)=>{
+      const data=JSON.parse(opts.body);
+      calls.push(data);
+      return reply({ok:true,result:{message_id:calls.length+1000}});
+    }
+  });
+  const env={
+    BOT_TOKEN:'fake',CHANNEL_ID:'@plazakvartal_svitlo',
+    WEBHOOK_SECRET:'signed-only',ADMIN_TELEGRAM_ID:'100',
+    SCHEDULE_STATE:{idFromName:()=>1,get:()=>publisher},
+    TEST_SOURCE_FETCH:async()=>reply(feedData),
+    TEST_FETCH:async(_url,opts)=>{
+      const data=JSON.parse(opts.body);
+      calls.push(data);
+      return reply({ok:true,result:{message_id:calls.length+1000}});
+    }
+  };
+  const msg=(id,value,secret='signed-only')=>
+    new Request('https://plazagrafik.workers.dev/telegram',{
+      method:'POST',headers:{'X-Telegram-Bot-Api-Secret-Token':secret},
+      body:JSON.stringify({message:{chat:{type:'private',id},from:{id},text:value}})
+    });
+  assert.equal((await handleTelegramWebhook(msg(100,'/recover22 '+date,'wrong'),env,{now})).status,403);
+  assert.equal((await handleTelegramWebhook(msg(101,'/recover22 '+date+' CONFIRM'),env,{now})).status,200);
+  assert.equal(calls.length,0);
+  assert.equal((await handleTelegramWebhook(msg(100,'/recover22 '+date),env,{now})).status,200);
+  assert.equal(calls.length,1,'preview only sends private warning');
+  assert.match(calls[0].text,/CONFIRM/);
+  assert.equal(calls[0].chat_id,'100');
+  assert.equal((await handleTelegramWebhook(msg(100,'/recover22 '+date+' CONFIRM'),env,{now})).status,200);
+  const channelPosts=calls.filter(x=>x.chat_id==='@plazakvartal_svitlo');
+  assert.equal(channelPosts.length,1);
+  assert.match(channelPosts[0].text,/10:30 до 14:30/);
+  assert.match(channelPosts[0].text,/21:00 до 22:00/);
+  assert.equal(store.data.get('date:'+date).status,'published');
+  assert.equal((await handleTelegramWebhook(msg(100,'/recover22 '+date+' CONFIRM'),env,{now})).status,200);
+  assert.equal(calls.filter(x=>x.chat_id==='@plazakvartal_svitlo').length,1,
+    'double confirmation cannot resend');
+});
