@@ -104,6 +104,29 @@ export class Group22Publisher {
       }
       return Response.json({profile:await this.ctx.storage.get(key)||null});
     }
+    if(route==='/status' && request.method==='POST') {
+      let input;
+      try{input=await request.json()}catch{return Response.json({status:'invalid'},{status:400})}
+      if(!DAY.test(input?.date||''))return Response.json({status:'invalid'},{status:400});
+      const item=await this.ctx.storage.get('date:'+input.date);
+      const pending=Boolean(item?.pending || item?.status==='pending');
+      const manualHold=Boolean(item?.manualHold);
+      const status=pending?'pending':
+        manualHold?'awaiting-source-sync':
+        item?.messageId?'published':'not-published';
+      let periods=null;
+      try{
+        const parsed=JSON.parse(item?.fingerprint||'null');
+        if(parsed?.date===input.date)periods=validatedPeriods(parsed.periods);
+      }catch{}
+      return Response.json({
+        status, date:input.date, messageId:item?.messageId||null,
+        publishedAt:item?.publishedAt||null,
+        startedAt:item?.pending?.startedAt||null,
+        periods,revision:item?.revision||0,
+        manualHold,hasSavedFingerprint:Boolean(item?.fingerprint)
+      });
+    }
     if(route==='/current' && request.method==='POST') {
       let input;try{input=await request.json();}catch{return Response.json({status:'invalid'},{status:400});}
       if(!DAY.test(input?.date||''))return Response.json({status:'invalid'},{status:400});
@@ -397,6 +420,74 @@ export async function handleTelegramWebhook(request,env,{now=new Date(),scope='p
     return new Response('OK');
   }
   const isAdmin=!!env.ADMIN_TELEGRAM_ID&&userId===String(env.ADMIN_TELEGRAM_ID);
+  if(scope==='plaza' && isAdmin && /^\/(?:status22|sync22)(?:@\w+)?$/i.test(text.trim())) {
+    if(!env.SCHEDULE_STATE) {
+      await tellOwner(env,chatId,'⚠️ У Cloudflare відсутня прив’язка SCHEDULE_STATE.');
+      return new Response('OK');
+    }
+    const nowDate=kyivDate(now),tomorrow=nextDate(nowDate);
+    const isSync=/^\/sync22/i.test(text.trim());
+    const stub=publisherStub(env);
+    let posts=[],feedError='';
+    try {
+      const fetchFn=env.TEST_SOURCE_FETCH||fetch;
+      const response=await fetchFn(SOURCE_URL,{
+        headers:{Accept:'application/json','Cache-Control':'no-cache'},
+        signal:AbortSignal.timeout(12000)
+      });
+      if(!response.ok)throw Error('GitHub HTTP '+response.status);
+      posts=choosePosts(await response.json(),now);
+    }catch(e){feedError=String(e?.message||e)}
+    const rows=['🩺 <b>Автографік 2.2 — Плаза</b>',''];
+    rows.push('📡 Джерело ДТЕК: '+(feedError?'❌ '+feedError:'✅ доступне'));
+    rows.push('📍 Куди надсилаємо: <code>'+
+      String(env.CHANNEL_ID||'не налаштовано').replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</code>');
+    for(const day of [nowDate,tomorrow]) {
+      const post=posts.find(p=>p.date===day);
+      const result=await stub.fetch('https://state.internal/status',{
+        method:'POST',body:JSON.stringify({date:day})
+      });
+      if(!result.ok)throw Error('Cannot read schedule publisher state');
+      const state=await result.json();
+      rows.push('');
+      rows.push((day===nowDate?'📆 Сьогодні: ':'🌅 Завтра: ')+day);
+      rows.push('Графік 2.2: '+(post?
+        '✅ '+post.periods.map(([a,b])=>
+          String(Math.floor(a/60)).padStart(2,'0')+':'+
+          String(a%60).padStart(2,'0')+'–'+
+          String(Math.floor(b/60)).padStart(2,'0')+':'+
+          String(b%60).padStart(2,'0')).join(', ') || '✅ Без відключень':
+        '⏳ немає підтверджених даних'));
+      rows.push('Публікація: '+({
+        pending:'⚠️ Невідомий результат відправки, автоматичний повтор заблоковано',
+        'awaiting-source-sync':'⏳ Очікування синхронізації після ручного графіка',
+        published:'✅ збережено ID повідомлення '+state.messageId,
+        'not-published':'❌ ще не опубліковано'
+      }[state.status]||state.status));
+      if(state.publishedAt)rows.push('Остання відправка: '+state.publishedAt);
+      if(state.startedAt)rows.push('Початок незавершеної: '+state.startedAt);
+    }
+    if(isSync) {
+      const post=posts.find(p=>p.date===tomorrow);
+      if(!post)rows.push('\n⚠️ Повтор не виконано: підтвердженого графіка на завтра немає.');
+      else {
+        const response=await stub.fetch('https://state.internal/publish',{
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({...post,source:'auto'})
+        });
+        const outcome=await response.json();
+        rows.push('\n🔄 Перевірка відправки завтра: <b>'+
+          String(outcome.status||'error')+'</b>');
+        if(outcome.status==='published')rows.push('✅ Надіслано допис №'+outcome.messageId);
+        if(outcome.status==='pending')rows.push('⚠️ Можливо вже надіслано. Потрібна перевірка у групі — не повторюємо наосліп.');
+        if(outcome.error)rows.push('Помилка: '+String(outcome.error).replace(/&/g,'&amp;').replace(/</g,'&lt;'));
+      }
+    }
+    rows.push('\n🔄 /sync22 — безпечно перевірити й опублікувати тільки графік на завтра, якщо немає дубля.');
+    await tellOwner(env,chatId,rows.join('\n'));
+    return new Response('OK');
+  }
+
   if(scope==='plaza'&&isAdmin&&/^\\/syncstatus(?:@plazakvartalbot)?$/i.test(text.trim())) {
     if(!env.SCHEDULE_STATE) {
       await tellOwner(env,chatId,'⚠️ Не налаштовано SCHEDULE_STATE у Cloudflare.');
