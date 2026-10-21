@@ -531,7 +531,7 @@ export async function handleTelegramWebhook(request,env,{now=new Date(),scope='p
       if(outcome[date])lines.push('🔄 Результат Cron: '+outcome[date]);
     }
     lines.push('','🔒 Діагностика доступна тільки власнику бота.');
-    await tellOwner(env,chatId,lines.join('\\n'));
+    await tellOwner(env,chatId,lines.join('\n'));
     return new Response('OK');
   }
   // Preserve owner-forwarded 2.2 schedules before personal menu handling.

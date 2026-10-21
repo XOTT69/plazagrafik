@@ -187,9 +187,13 @@ test('cron reads confirmed feed and passes it to persistent publisher',async()=>
     now:new Date('2026-10-16T22:20:00Z'),
     fetchFn:async()=>reply(feed())
   });
-  assert.equal(posted.length,1);
+  assert.equal(posted.length,2,'one publication and one diagnostics heartbeat');
   assert.equal(result[0].status,'published');
   assert.equal(posted[0].date,DATE);
+  assert.deepEqual(posted[1].results,[
+    {date:DATE,status:'published'},
+    {date:'2026-10-18',status:'no-confirmed-fact'}
+  ]);
   assert.equal(diagnostics.length,1);
   assert.equal(diagnostics[0].status,'ok');
 });
