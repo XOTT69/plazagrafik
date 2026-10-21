@@ -557,7 +557,10 @@ test('only signed Plaza owner can recover missing 22 October timetable after con
   const env={
     BOT_TOKEN:'fake',CHANNEL_ID:'@plazakvartal_svitlo',
     WEBHOOK_SECRET:'signed-only',ADMIN_TELEGRAM_ID:'100',
-    SCHEDULE_STATE:{idFromName:()=>1,get:()=>publisher},
+    SCHEDULE_STATE:{idFromName:()=>1,get:()=>({
+      fetch:(url,options)=>publisher.fetch(
+        url instanceof Request?url:new Request(url,options))
+    })},
     TEST_SOURCE_FETCH:async()=>reply(feedData),
     TEST_FETCH:async(_url,opts)=>{
       const data=JSON.parse(opts.body);
