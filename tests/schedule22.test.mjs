@@ -505,6 +505,13 @@ test('admin /sync22 respects already pending Telegram sends and never retries bl
   assert.equal(calls.filter(x=>x.endsWith('/publish')).length,1);
   assert.match(botMessages[0].text,/Потрібна перевірка у групі/);
   assert.match(botMessages[0].text,/автоматичний повтор заблоковано/);
+  const statusRequest=new Request('https://example.workers.dev/telegram',{
+    method:'POST',headers:{'X-Telegram-Bot-Api-Secret-Token':'signed-only'},
+    body:JSON.stringify({message:{chat:{type:'private',id:100},
+      from:{id:100},text:'/status22'}})
+  });
+  assert.equal((await handleTelegramWebhook(statusRequest,env,{now})).status,200);
+  assert.match(botMessages[1].text,/\/recover22 2026-10-22/);
 });
 
 test('pending recovery requires exact previous attempt, identical fact and minimum age',async()=>{

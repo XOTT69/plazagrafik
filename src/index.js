@@ -459,6 +459,7 @@ export async function handleTelegramWebhook(request,env,{now=new Date(),scope='p
     rows.push('📡 Джерело ДТЕК: '+(feedError?'❌ '+feedError:'✅ доступне'));
     rows.push('📍 Куди надсилаємо: <code>'+
       String(env.CHANNEL_ID||'не налаштовано').replace(/&/g,'&amp;').replace(/</g,'&lt;')+'</code>');
+    const blockedDates=[];
     for(const day of [nowDate,tomorrow]) {
       const post=posts.find(p=>p.date===day);
       const result=await stub.fetch('https://state.internal/status',{
@@ -466,6 +467,7 @@ export async function handleTelegramWebhook(request,env,{now=new Date(),scope='p
       });
       if(!result.ok)throw Error('Cannot read schedule publisher state');
       const state=await result.json();
+      if(state.status==='pending')blockedDates.push(day);
       rows.push('');
       rows.push((day===nowDate?'📆 Сьогодні: ':'🌅 Завтра: ')+day);
       rows.push('Графік 2.2: '+(post?
@@ -500,7 +502,12 @@ export async function handleTelegramWebhook(request,env,{now=new Date(),scope='p
         if(outcome.error)rows.push('Помилка: '+String(outcome.error).replace(/&/g,'&amp;').replace(/</g,'&lt;'));
       }
     }
-    rows.push('\n🔄 /sync22 — безпечно перевірити й опублікувати тільки графік на завтра, якщо немає дубля.');
+    rows.push('\n🔄 /sync22 — звичайна перевірка на завтра без дублів.');
+    for(const blocked of blockedDates) {
+      rows.push('\n⚠️ Якщо графіка '+blocked+' НЕМАЄ в каналі, після перевірки використай:');
+      rows.push('<code>/recover22 '+blocked+'</code>');
+      rows.push('Це ручне відновлення; /sync22 не знімає pending.');
+    }
     await tellOwner(env,chatId,rows.join('\n'));
     return new Response('OK');
   }
