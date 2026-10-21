@@ -174,7 +174,7 @@ test('cron reads confirmed feed and passes it to persistent publisher',async()=>
     idFromName:()=>1,get:()=>({
       fetch:async(url,opts)=>{
         const value=JSON.parse(opts.body);
-        if(url.endsWith('/cron-record')){
+        if(url.endsWith('/cron-result')){
           diagnostics.push(value);
           return reply({status:'recorded'});
         }
