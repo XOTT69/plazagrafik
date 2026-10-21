@@ -231,28 +231,67 @@ export class Group22Publisher {
   }
 }
 
+async function saveCronDiagnostics(stub,summary) {
+  // Logging must never prevent a successful Telegram post or turn a
+  // completed run into an ambiguous failure requiring a duplicate retry.
+  try {
+    await stub.fetch('https://state.internal/cron-result',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(summary)
+    });
+  } catch(error) {
+    console.warn('2.2 diagnostic heartbeat unavailable: '+String(error?.message||error));
+  }
+}
+
 export async function checkDtekAndPublish(env,{fetchFn=fetch,now=new Date()}={}) {
   if(!env.SCHEDULE_STATE)throw new Error('Missing SCHEDULE_STATE durable object binding');
-  const response=await fetchFn(SOURCE_URL,{
-    headers:{Accept:'application/json','Cache-Control':'no-cache'},
-    signal:AbortSignal.timeout(12000)
-  });
-  if(!response.ok)throw new Error('DTEK confirmed feed HTTP '+response.status);
-  const data=await response.json();
-  const posts=choosePosts(data,now);
   const stub=env.SCHEDULE_STATE.get(env.SCHEDULE_STATE.idFromName('confirmed-2.2'));
-  const results=[];
-  for(const post of posts) {
-    post.source='auto';
-    const res=await stub.fetch('https://state.internal/publish',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(post)
+  const today=kyivDate(now),dates=[today,nextDate(today)];
+  const checkedAt=now.toISOString();
+  let results=[];
+  try {
+    // A fresh URL on every poll prevents a stale GitHub raw CDN response
+    // from hiding tomorrow's new confirmed DTEK schedule.
+    const url=SOURCE_URL+'?v='+encodeURIComponent(String(now.getTime()));
+    const response=await fetchFn(url,{
+      headers:{Accept:'application/json','Cache-Control':'no-cache'},
+      cache:'no-store',
+      signal:AbortSignal.timeout(12000)
     });
-    const outcome=await res.json();
-    if(!res.ok)console.error('Group 2.2 post failed for '+post.date+': '+outcome.error);
-    results.push({date:post.date,...outcome});
+    if(!response.ok)throw new Error('DTEK confirmed feed HTTP '+response.status);
+    const data=await response.json();
+    const posts=choosePosts(data,now);
+    const seen=new Set();
+    for(const post of posts) {
+      seen.add(post.date);
+      post.source='auto';
+      const res=await stub.fetch('https://state.internal/publish',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(post)
+      });
+      const outcome=await res.json();
+      if(!res.ok)console.error('Group 2.2 post failed for '+post.date+': '+outcome.error);
+      results.push({date:post.date,...outcome});
+    }
+    // Track missing dates explicitly. No claim that a missing fact is a
+    // successful Telegram publication.
+    const summary=dates.map(date=>{
+      const found=results.find(r=>r.date===date);
+      return found?{date,status:found.status}:{date,status:'no-confirmed-fact'};
+    });
+    await saveCronDiagnostics(stub,{
+      checkedAt,status:'ok',results:summary
+    });
+    return results;
+  } catch(error) {
+    await saveCronDiagnostics(stub,{
+      checkedAt,status:'error',
+      results:dates.map(date=>({date,status:'check-failed'})),
+      error:String(error?.message||error)
+    });
+    throw error;
   }
-  return results;
 }
 
 function dtekEnv(env) {
