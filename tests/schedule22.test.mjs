@@ -413,3 +413,82 @@ test('a pre-existing published message counts as a revision and does not repost 
   assert.match(texts[0],/^🔄 <b>Оновлений графік відключення світла<\/b>/);
   assert.equal(texts.length,1);
 });
+
+
+test('private admin /status22 diagnoses tomorrow without posting duplicate Telegram messages',async()=>{
+  const date='2026-10-22';
+  const groups=Object.fromEntries(GROUPS.map(g=>[g,g==='2.2'?[[630,870],[1260,1320]]:[]]));
+  const feedData={confirmedSchedules:{[date]:groups}};
+  const t=new Date('2026-10-21T17:55:00Z');
+  const botMessages=[],published=[];
+  const env={
+    BOT_TOKEN:'fake',CHANNEL_ID:'-100123',WEBHOOK_SECRET:'signed-only',
+    ADMIN_TELEGRAM_ID:'100',
+    SCHEDULE_STATE:{idFromName:()=>1,get:()=>({
+      fetch:async(url,opts)=>{
+        const input=JSON.parse(opts.body);
+        if(url.endsWith('/status'))return reply({
+          status:'not-published',date:input.date,
+          messageId:null,publishedAt:null
+        });
+        published.push(input);return reply({status:'published',messageId:71});
+      }
+    })},
+    TEST_SOURCE_FETCH:async()=>reply(feedData),
+    TEST_FETCH:async(_url,opts)=>{
+      botMessages.push(JSON.parse(opts.body));
+      return reply({ok:true,result:{message_id:90}});
+    }
+  };
+  const msg=(value,id=100)=>new Request('https://example.workers.dev/telegram',{
+    method:'POST',headers:{'X-Telegram-Bot-Api-Secret-Token':'signed-only'},
+    body:JSON.stringify({message:{
+      chat:{type:'private',id},from:{id},text:value
+    }})
+  });
+  assert.equal((await handleTelegramWebhook(msg('/status22'),env,{now:t})).status,200);
+  assert.equal(published.length,0);
+  assert.equal(botMessages.length,1);
+  assert.match(botMessages[0].text,/Автографік 2\.2/);
+  assert.match(botMessages[0].text,/10:30–14:30/);
+  assert.match(botMessages[0].text,/21:00–22:00/);
+  assert.match(botMessages[0].text,/ще не опубліковано/);
+  assert.equal((await handleTelegramWebhook(msg('/status22',101),env,{now:t})).status,200);
+  assert.equal(botMessages.length,1,'not an admin: no diagnostic access');
+  assert.equal((await handleTelegramWebhook(msg('/sync22'),env,{now:t})).status,200);
+  assert.equal(published.length,1,'sync submits tomorrow only once to the dedup publisher');
+  assert.equal(published[0].date,date);
+  assert.equal(published[0].source,'auto');
+  assert.match(botMessages[1].text,/Надіслано допис №71/);
+});
+
+test('admin /sync22 respects already pending Telegram sends and never retries blindly',async()=>{
+  const date='2026-10-22',now=new Date('2026-10-21T17:55:00Z');
+  const full=Object.fromEntries(GROUPS.map(g=>[g,g==='2.2'?[[630,870]]:[]]));
+  const calls=[],botMessages=[];
+  const env={
+    BOT_TOKEN:'fake',CHANNEL_ID:'-100123',WEBHOOK_SECRET:'signed-only',
+    ADMIN_TELEGRAM_ID:'100',
+    SCHEDULE_STATE:{idFromName:()=>1,get:()=>({
+      fetch:async(url,opts)=>{
+        calls.push(url);
+        if(url.endsWith('/status'))return reply({status:'pending',startedAt:'2026-10-21T17:00:00Z'});
+        return reply({status:'pending',reason:'delivery outcome unknown'});
+      }
+    })},
+    TEST_SOURCE_FETCH:async()=>reply({confirmedSchedules:{[date]:full}}),
+    TEST_FETCH:async(_url,opts)=>{
+      botMessages.push(JSON.parse(opts.body));
+      return reply({ok:true,result:{message_id:13}});
+    }
+  };
+  const req=new Request('https://example.workers.dev/telegram',{
+    method:'POST',headers:{'X-Telegram-Bot-Api-Secret-Token':'signed-only'},
+    body:JSON.stringify({message:{chat:{type:'private',id:100},
+      from:{id:100},text:'/sync22'}})
+  });
+  assert.equal((await handleTelegramWebhook(req,env,{now})).status,200);
+  assert.equal(calls.filter(x=>x.endsWith('/publish')).length,1);
+  assert.match(botMessages[0].text,/Потрібна перевірка у групі/);
+  assert.match(botMessages[0].text,/автоматичний повтор заблоковано/);
+});
