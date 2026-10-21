@@ -488,7 +488,7 @@ export async function handleTelegramWebhook(request,env,{now=new Date(),scope='p
     return new Response('OK');
   }
 
-  if(scope==='plaza'&&isAdmin&&/^\\/syncstatus(?:@plazakvartalbot)?$/i.test(text.trim())) {
+  if(scope==='plaza'&&isAdmin&&/^\/syncstatus(?:@plazakvartalbot)?$/i.test(text.trim())) {
     if(!env.SCHEDULE_STATE) {
       await tellOwner(env,chatId,'⚠️ Не налаштовано SCHEDULE_STATE у Cloudflare.');
       return new Response('OK');
