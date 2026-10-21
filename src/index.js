@@ -397,6 +397,52 @@ export async function handleTelegramWebhook(request,env,{now=new Date(),scope='p
     return new Response('OK');
   }
   const isAdmin=!!env.ADMIN_TELEGRAM_ID&&userId===String(env.ADMIN_TELEGRAM_ID);
+  if(scope==='plaza'&&isAdmin&&/^\\/syncstatus(?:@plazakvartalbot)?$/i.test(text.trim())) {
+    if(!env.SCHEDULE_STATE) {
+      await tellOwner(env,chatId,'⚠️ Не налаштовано SCHEDULE_STATE у Cloudflare.');
+      return new Response('OK');
+    }
+    const today=kyivDate(now),tomorrow=nextDate(today);
+    const response=await publisherStub(env).fetch('https://state.internal/diagnostics',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({dates:[today,tomorrow]})
+    });
+    if(!response.ok)throw new Error('Cannot read 2.2 sync diagnostics');
+    const info=await response.json();
+    const statuses={
+      published:'✅ Опубліковано',pending:'⚠️ Невизначена відправка',
+      'not-published':'⏳ Ще не опубліковано'
+    };
+    const lines=['🩺 <b>Автопублікація ДТЕК — підгрупа 2.2</b>',''];
+    if(info.lastCron?.checkedAt) {
+      const dt=new Date(info.lastCron.checkedAt);
+      const local=Number.isNaN(dt.getTime())?'невідомо':
+        new Intl.DateTimeFormat('uk-UA',{timeZone:'Europe/Kyiv',
+          day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).format(dt);
+      const age=Math.round((now.getTime()-dt.getTime())/60000);
+      const fresh=age>=0&&age<=15;
+      lines.push((fresh?'✅':'⚠️')+' Останній Cron: '+local+
+        (Number.isFinite(age)?' ('+Math.max(0,age)+' хв тому)':''));
+      if(info.lastCron.status==='error')
+        lines.push('❌ Помилка перевірки: '+String(info.lastCron.error||'невідома').slice(0,150));
+    } else {
+      lines.push('⚠️ Запису про роботу Cron ще немає.');
+    }
+    const outcome=Object.fromEntries((info.lastCron?.results||[])
+      .filter(x=>DAY.test(x?.date||'')).map(x=>[x.date,x.status]));
+    for(const date of [today,tomorrow]) {
+      const day=info.days?.[date]||{};
+      lines.push('',(date===today?'📅 Сьогодні: ':'🌅 Завтра: ')+date,
+        statuses[day.status]||'⏳ Не відомо');
+      if(day.messageId)lines.push('📨 Допис №'+day.messageId);
+      if(day.pendingSince)lines.push('⚠️ Потрібно перевірити, чи Telegram прийняв повідомлення.');
+      if(day.manualHold)lines.push('⏸ Очікування джерела після ручного графіка.');
+      if(outcome[date])lines.push('🔄 Результат Cron: '+outcome[date]);
+    }
+    lines.push('','🔒 Діагностика доступна тільки власнику бота.');
+    await tellOwner(env,chatId,lines.join('\\n'));
+    return new Response('OK');
+  }
   // Preserve owner-forwarded 2.2 schedules before personal menu handling.
   if(scope==='plaza'&&isAdmin){
     const schedule=parseForwardedGroup22(text,now);
