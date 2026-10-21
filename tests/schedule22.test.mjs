@@ -169,10 +169,18 @@ test('definite Telegram 403 is retried on a later run after permissions fixed',a
   assert.equal(called,2);
 });
 test('cron reads confirmed feed and passes it to persistent publisher',async()=>{
-  const posted=[];
+  const posted=[],diagnostics=[];
   const env={SCHEDULE_STATE:{
     idFromName:()=>1,get:()=>({
-      fetch:async(_url,opts)=>{posted.push(JSON.parse(opts.body));return reply({status:'published'});}
+      fetch:async(url,opts)=>{
+        const value=JSON.parse(opts.body);
+        if(url.endsWith('/cron-record')){
+          diagnostics.push(value);
+          return reply({status:'recorded'});
+        }
+        posted.push(value);
+        return reply({status:'published'});
+      }
     })
   }};
   const result=await checkDtekAndPublish(env,{
@@ -182,6 +190,8 @@ test('cron reads confirmed feed and passes it to persistent publisher',async()=>
   assert.equal(posted.length,1);
   assert.equal(result[0].status,'published');
   assert.equal(posted[0].date,DATE);
+  assert.equal(diagnostics.length,1);
+  assert.equal(diagnostics[0].status,'ok');
 });
 
 
