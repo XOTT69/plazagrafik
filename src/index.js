@@ -53,6 +53,44 @@ export class Group22Publisher {
   }
   async fetch(request) {
     const route=new URL(request.url).pathname;
+    // Internal-only DO diagnostics: Worker never exposes these paths publicly.
+    if(route==='/diagnostics' && request.method==='POST') {
+      let payload;
+      try{payload=await request.json();}catch{return Response.json({status:'invalid'},{status:400});}
+      if(!Array.isArray(payload?.dates)||payload.dates.length>3||
+        payload.dates.some(date=>!DAY.test(date)))
+        return Response.json({status:'invalid'},{status:400});
+      const days={};
+      for(const date of payload.dates) {
+        const item=await this.ctx.storage.get('date:'+date);
+        days[date]={
+          status:item?.pending||item?.status==='pending'?'pending':
+            item?.messageId?'published':'not-published',
+          messageId:Number.isSafeInteger(item?.messageId)?item.messageId:null,
+          publishedAt:item?.publishedAt||null,
+          manualHold:!!item?.manualHold,
+          // Do not leak raw Telegram token, credentials, or source text.
+          pendingSince:item?.pending?.startedAt||null
+        };
+      }
+      return Response.json({lastCron:await this.ctx.storage.get('lastCron')||null,days});
+    }
+    if(route==='/cron-result' && request.method==='POST') {
+      let payload;
+      try{payload=await request.json();}catch{return Response.json({status:'invalid'},{status:400});}
+      if(typeof payload?.checkedAt!=='string'||!Array.isArray(payload?.results)||
+        payload.results.length>3)return Response.json({status:'invalid'},{status:400});
+      const summary={checkedAt:payload.checkedAt,
+        status:payload.status==='error'?'error':'ok',
+        results:payload.results.map(v=>({
+          date:DAY.test(v?.date||'')?v.date:null,
+          status:String(v?.status||'unknown').slice(0,60)
+        })),
+        error:payload.status==='error'?String(payload.error||'Unknown error').slice(0,180):null
+      };
+      await this.ctx.storage.put('lastCron',summary);
+      return Response.json({status:'saved'});
+    }
     if(route==='/profile' && request.method==='POST') {
       let payload;
       try{payload=await request.json();}catch{return Response.json({status:'invalid'},{status:400});}
