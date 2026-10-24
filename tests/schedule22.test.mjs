@@ -530,16 +530,18 @@ test('pending recovery requires exact previous attempt, identical fact and minim
   await store.put(key,{pending:{fingerprint:scheduleFingerprint(date,periods),startedAt:old}});
   assert.equal((await published()).status,'pending');
   assert.equal((await published({recovery:{confirmedMissing:true,pendingSince:'wrong'}})).status,'recovery-refused');
-  assert.equal((await published({recovery:{confirmedMissing:true,pendingSince:old},
-    periods:[[630,900]]})).status,'recovery-refused');
   assert.equal(sends,0);
-  const a=await published({recovery:{confirmedMissing:true,pendingSince:old}});
+  // DTEK may update its hours after the ambiguous first send.
+  const latest=[[630,900]];
+  const a=await published({recovery:{confirmedMissing:true,pendingSince:old},
+    periods:latest});
   assert.equal(a.status,'published');
+  assert.equal(store.data.get(key).fingerprint,scheduleFingerprint(date,latest));
   assert.equal(a.messageId,301);
   assert.equal(sends,1);
   assert.equal((await published({recovery:{confirmedMissing:true,pendingSince:old}})).status,'recovery-refused');
-  assert.equal((await published()).status,'unchanged');
-  assert.equal(sends,1,'repeated confirmation and cron never send duplicates');
+  assert.equal((await published({periods:latest})).status,'unchanged');
+  assert.equal(sends,1,'recovery publishes only the latest verified version');
 });
 
 test('only signed Plaza owner can recover missing 22 October timetable after confirmation',async()=>{
@@ -596,4 +598,54 @@ test('only signed Plaza owner can recover missing 22 October timetable after con
   assert.equal((await handleTelegramWebhook(msg(100,'/recover22 '+date+' CONFIRM'),env,{now})).status,200);
   assert.equal(calls.filter(x=>x.chat_id==='@plazakvartal_svitlo').length,1,
     'double confirmation cannot resend');
+});
+
+test('new confirmed hours supersede an uncertain older Telegram attempt',async()=>{
+  const store=storage(),date='2026-10-24';
+  const first=[[600,720]],latest=[[900,1110]];
+  let sends=0;
+  const publisher=new Group22Publisher({storage:store},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'@plazakvartal_svitlo',
+    TEST_FETCH:async()=>{
+      sends++;
+      if(sends===1)throw new Error('lost response');
+      return reply({ok:true,result:{message_id:800}});
+    }
+  });
+  const publish=async periods=>(await (await publisher.fetch(new Request(
+    'https://state.internal/publish',{method:'POST',body:JSON.stringify({
+      date,periods,text:format22(date,periods)
+    })}))).json());
+  assert.equal((await publish(first)).status,'error');
+  assert.equal((await publish(first)).status,'pending','never replay the uncertain same version');
+  assert.equal((await publish(latest)).status,'published','publish the newer DTEK version');
+  assert.equal((await publish(latest)).status,'unchanged');
+  assert.equal(sends,2);
+  assert.equal(store.data.get('date:'+date).fingerprint,scheduleFingerprint(date,latest));
+});
+
+test('stuck Telegram send alerts owner once without blocking cron diagnostics',async()=>{
+  const date='2026-10-24',store=storage(),posts=[];
+  const pendingAt=new Date(Date.now()-15*60_000).toISOString();
+  await store.put('date:'+date,{pending:{
+    fingerprint:scheduleFingerprint(date,[[900,1110]]),startedAt:pendingAt
+  }});
+  const publisher=new Group22Publisher({storage:store},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'@plazakvartal_svitlo',
+    ADMIN_TELEGRAM_ID:'100',
+    TEST_FETCH:async(_url,request)=>{
+      posts.push(JSON.parse(request.body));
+      return reply({ok:true,result:{message_id:51}});
+    }
+  });
+  const notify=async()=>(await (await publisher.fetch(new Request(
+    'https://state.internal/cron-result',{method:'POST',body:JSON.stringify({
+      checkedAt:new Date().toISOString(),status:'ok',
+      results:[{date,status:'pending'}]
+    })}))).json());
+  assert.equal((await notify()).status,'saved');
+  assert.equal((await notify()).status,'saved');
+  assert.equal(posts.length,1,'do not spam the owner every 5 minutes');
+  assert.equal(posts[0].chat_id,'100');
+  assert.match(posts[0].text,/recover22 2026-10-24/);
 });
