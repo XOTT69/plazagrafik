@@ -540,9 +540,8 @@ test('pending recovery requires exact previous attempt, identical fact and minim
   assert.equal(a.messageId,301);
   assert.equal(sends,1);
   assert.equal((await published({recovery:{confirmedMissing:true,pendingSince:old}})).status,'recovery-refused');
-  assert.equal((await published()).status,'published');
-  assert.equal((await published({periods:[[630,900]]})).status,'unchanged');
-  assert.equal(sends,2,'a genuinely different confirmed version may publish');
+  assert.equal((await published({periods:latest})).status,'unchanged');
+  assert.equal(sends,1,'recovery publishes only the latest verified version');
 });
 
 test('only signed Plaza owner can recover missing 22 October timetable after confirmation',async()=>{
