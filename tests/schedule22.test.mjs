@@ -514,7 +514,7 @@ test('admin /sync22 respects already pending Telegram sends and never retries bl
   assert.match(botMessages[1].text,/\/recover22 2026-10-22/);
 });
 
-test('pending recovery requires exact previous attempt, identical fact and minimum age',async()=>{
+test('pending recovery matches the attempt and minimum age but accepts updated hours',async()=>{
   const date='2026-10-22',periods=[[630,870],[1260,1320]];
   let sends=0;
   const store=storage(),key='date:'+date;
@@ -530,16 +530,83 @@ test('pending recovery requires exact previous attempt, identical fact and minim
   await store.put(key,{pending:{fingerprint:scheduleFingerprint(date,periods),startedAt:old}});
   assert.equal((await published()).status,'pending');
   assert.equal((await published({recovery:{confirmedMissing:true,pendingSince:'wrong'}})).status,'recovery-refused');
-  assert.equal((await published({recovery:{confirmedMissing:true,pendingSince:old},
-    periods:[[630,900]]})).status,'recovery-refused');
+  const recent=new Date().toISOString();
+  await store.put(key,{pending:{fingerprint:scheduleFingerprint(date,periods),startedAt:recent}});
+  assert.equal((await published({recovery:{confirmedMissing:true,pendingSince:recent}})).status,'recovery-refused');
+  await store.put(key,{pending:{fingerprint:scheduleFingerprint(date,periods),startedAt:old}});
   assert.equal(sends,0);
-  const a=await published({recovery:{confirmedMissing:true,pendingSince:old}});
+  const revised=[[630,900]];
+  const a=await published({periods:revised,recovery:{confirmedMissing:true,pendingSince:old}});
   assert.equal(a.status,'published');
   assert.equal(a.messageId,301);
   assert.equal(sends,1);
   assert.equal((await published({recovery:{confirmedMissing:true,pendingSince:old}})).status,'recovery-refused');
-  assert.equal((await published()).status,'unchanged');
+  assert.equal((await published({periods:revised})).status,'unchanged');
   assert.equal(sends,1,'repeated confirmation and cron never send duplicates');
+});
+
+test('changed 24 October hours supersede an old pending attempt exactly once across concurrent cron runs',async()=>{
+  const date='2026-10-24',store=storage(),key='date:'+date;
+  const older=[[900,1140]],current=[[900,1110]];
+  await store.put(key,{pending:{
+    fingerprint:scheduleFingerprint(date,older),
+    startedAt:new Date(Date.now()-180000).toISOString()
+  }});
+  const calls=[];
+  const object=new Group22Publisher({storage:store},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'-100123',TEST_FETCH:async(_url,options)=>{
+      calls.push(JSON.parse(options.body));
+      return reply({ok:true,result:{message_id:2400}});
+    }
+  });
+  const publish=()=>object.fetch(new Request('https://state.internal/publish',{
+    method:'POST',body:JSON.stringify({date,periods:current,text:format22(date,current),source:'auto'})
+  }));
+  const results=await Promise.all([publish(),publish(),publish()]);
+  assert.deepEqual(await Promise.all(results.map(async r=>(await r.json()).status)),
+    ['published','unchanged','unchanged']);
+  assert.equal(calls.length,1);
+  assert.match(calls[0].text,/15:00 до 18:30/);
+  assert.equal(store.data.get(key).pending,undefined);
+  assert.equal(store.data.get(key).fingerprint,scheduleFingerprint(date,current));
+});
+
+test('unchanged uncertain delivery and a recent changed attempt still cannot be retried automatically',async()=>{
+  const date='2026-10-24',store=storage(),key='date:'+date;
+  const older=[[900,1140]],current=[[900,1110]];
+  const object=new Group22Publisher({storage:store},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'-100123',
+    TEST_FETCH:async()=>{assert.fail('must not send an uncertain duplicate');}
+  });
+  const publish=periods=>object.fetch(new Request('https://state.internal/publish',{
+    method:'POST',body:JSON.stringify({date,periods,text:format22(date,periods),source:'auto'})
+  }));
+  await store.put(key,{pending:{fingerprint:scheduleFingerprint(date,older),
+    startedAt:new Date(Date.now()-180000).toISOString()}});
+  assert.equal((await (await publish(older)).json()).status,'pending');
+  await store.put(key,{pending:{fingerprint:scheduleFingerprint(date,older),
+    startedAt:new Date().toISOString()}});
+  assert.equal((await (await publish(current)).json()).status,'pending');
+});
+
+test('definite rejection of a superseding version clears the obsolete pending marker for later retry',async()=>{
+  const date='2026-10-24',store=storage(),key='date:'+date;
+  const periods=[[900,1110]];
+  await store.put(key,{pending:{fingerprint:scheduleFingerprint(date,[[900,1140]]),
+    startedAt:new Date(Date.now()-180000).toISOString()}});
+  let calls=0;
+  const object=new Group22Publisher({storage:store},{
+    BOT_TOKEN:'fake',CHANNEL_ID:'-100123',TEST_FETCH:async()=>++calls===1
+      ?reply({ok:false,description:'Too Many Requests'},429)
+      :reply({ok:true,result:{message_id:2401}})
+  });
+  const publish=()=>object.fetch(new Request('https://state.internal/publish',{
+    method:'POST',body:JSON.stringify({date,periods,text:format22(date,periods),source:'auto'})
+  }));
+  assert.equal((await (await publish()).json()).status,'error');
+  assert.equal(store.data.has(key),false);
+  assert.equal((await (await publish()).json()).status,'published');
+  assert.equal(calls,2);
 });
 
 test('only signed Plaza owner can recover missing 22 October timetable after confirmation',async()=>{
@@ -550,7 +617,7 @@ test('only signed Plaza owner can recover missing 22 October timetable after con
   };
   const store=storage(),startedAt=new Date(Date.now()-180000).toISOString();
   await store.put('date:'+date,{pending:{
-    fingerprint:scheduleFingerprint(date,periods),startedAt
+    fingerprint:scheduleFingerprint(date,[[630,900],[1260,1320]]),startedAt
   }});
   const calls=[];
   const publisher=new Group22Publisher({storage:store},{

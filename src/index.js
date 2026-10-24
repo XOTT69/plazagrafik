@@ -162,7 +162,8 @@ export class Group22Publisher {
       const knownFingerprint=previous?.fingerprint ||
         scheduleFingerprintFromText(payload.date,previous?.text);
       // Only the signed owner command can acknowledge a missing Telegram post.
-      // Match the exact pending attempt and verified schedule before one retry.
+      // Match the exact pending attempt before one owner-confirmed retry.
+      // The confirmed source may now contain newer hours than that attempt.
       // Cron and /sync22 never carry this recovery acknowledgment.
       const recovery=payload.recovery;
       const recovering=recovery?.confirmedMissing===true;
@@ -171,23 +172,30 @@ export class Group22Publisher {
         const startedMs=Date.parse(startedAt);
         if(!recovering || !previous?.pending ||
           previous.pending.startedAt!==startedAt ||
-          previous.pending.fingerprint!==fingerprint ||
           !Number.isFinite(startedMs) ||
           Date.now()-startedMs<60_000) {
           return Response.json({status:'recovery-refused',
-            reason:'Pending attempt changed, is too recent, or schedule differs'});
+            reason:'Pending attempt changed or is too recent'});
         }
       }
+      const pending=previous?.pending;
+      const pendingStartedMs=Date.parse(pending?.startedAt||'');
+      // An uncertain delivery blocks retries of THAT timetable, not every
+      // later revision for the same day. Wait for the old send to settle,
+      // then allow genuinely changed hours through the usual dedup checks.
+      const supersedingPending=Boolean(pending?.fingerprint &&
+        pending.fingerprint!==fingerprint &&
+        Number.isFinite(pendingStartedMs) &&
+        Date.now()-pendingStartedMs>=60_000);
       if((previous?.pending || previous?.status==='pending')&&!recovering) {
-        // Delivery was uncertain. Only a date-specific, owner-confirmed
-        // recovery can bypass this protection; no automated duplicates.
-        return Response.json({status:'pending',reason:'delivery outcome unknown'});
+        if(!supersedingPending)
+          return Response.json({status:'pending',reason:'delivery outcome unknown'});
       }
       // When a manual forward outruns the cached public DTEK snapshot,
       // do not bounce between newer manual and older auto data every 5 min.
       // Allow auto publishing once its snapshot has actually changed from
       // the one observed when manual fallback was used.
-      if(source==='auto' && previous?.manualHold) {
+      if(source==='auto' && previous?.manualHold && !recovering) {
         const baseline=previous.manualHold.autoFingerprint;
         if(knownFingerprint===fingerprint && previous.messageId) {
           await this.ctx.storage.put(key,{
@@ -205,8 +213,9 @@ export class Group22Publisher {
       }
       if(knownFingerprint===fingerprint && previous?.messageId) {
         // Migrate an older per-day record without a canonical fingerprint.
-        if(!previous.fingerprint)await this.ctx.storage.put(key,{
+        if(!previous.fingerprint || recovering)await this.ctx.storage.put(key,{
           ...previous,fingerprint,
+          ...(recovering?{pending:null,status:'published'}:{}),
           ...(source==='auto'?{lastAutoFingerprint:fingerprint}:{})
         });
         return Response.json({status:'unchanged',messageId:previous.messageId});
@@ -234,7 +243,15 @@ export class Group22Publisher {
         // Explicit 4xx means Telegram did not accept this particular send.
         // Preserve the previously successful revision, if one exists.
         if(err.status>=400 && err.status<500) {
-          if(previous)await this.ctx.storage.put(key,previous);
+          // Owner acknowledgment/new hours retire the older uncertainty.
+          // A rejected new send must not restore that stale pending marker.
+          if(previous && (recovering || supersedingPending)) {
+            if(previous.messageId) {
+              const {pending:_pending,...confirmed}=previous;
+              await this.ctx.storage.put(key,{...confirmed,status:'published'});
+            } else await this.ctx.storage.delete(key);
+          }
+          else if(previous)await this.ctx.storage.put(key,previous);
           else await this.ctx.storage.delete(key);
         }
         throw err;
@@ -578,7 +595,7 @@ export async function handleTelegramWebhook(request,env,{now=new Date(),scope='p
         '. Telegram підтвердив повідомлення №'+outcome.messageId+'.');
     } else {
       const explanations={
-        'recovery-refused':'Стан або години змінилися, повтор заблоковано.',
+        'recovery-refused':'Незавершена спроба змінилася або минуло менше хвилини. Перевір /status22 і спробуй відновлення ще раз.',
         pending:'Telegram знову не підтвердив відправку; автоматичний повтор заблоковано.',
         unchanged:'Цей графік уже збережений як опублікований.',
         error:'Не вдалося підтвердити доставку. Перевір логи та канал.'
