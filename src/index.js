@@ -89,6 +89,33 @@ export class Group22Publisher {
         error:payload.status==='error'?String(payload.error||'Unknown error').slice(0,180):null
       };
       await this.ctx.storage.put('lastCron',summary);
+      // Do not silently hold a day's confirmed timetable forever after an
+      // ambiguous Telegram response. Notify the owner once per stuck attempt.
+      const adminId=String(this.env.ADMIN_TELEGRAM_ID||'');
+      if(this.env.BOT_TOKEN && /^[1-9][0-9]{0,17}$/.test(adminId)) {
+        for(const result of summary.results) {
+          if(result.status!=='pending'||!result.date)continue;
+          const state=await this.ctx.storage.get('date:'+result.date);
+          const since=state?.pending?.startedAt;
+          const age=Date.now()-Date.parse(since||'');
+          if(!Number.isFinite(age)||age<10*60_000)continue;
+          const noticeKey='pendingNotice:'+result.date;
+          if((await this.ctx.storage.get(noticeKey))?.since===since)continue;
+          try {
+            await telegramCall(this.env,'sendMessage',{
+              chat_id:adminId,parse_mode:'HTML',disable_notification:true,
+              text:'⚠️ <b>Графік 2.2 за '+result.date+
+                ' не підтверджено Telegram.</b>\n'+
+                'Автоматичний повтор того самого графіка може створити дубль. '+
+                'Перевір канал, потім /syncstatus або /recover22 '+
+                result.date+'. Нові підтверджені години не блокуються.'
+            },this.env.TEST_FETCH||fetch);
+            await this.ctx.storage.put(noticeKey,{since,notifiedAt:new Date().toISOString()});
+          } catch(error) {
+            console.error('Group 2.2 pending alert failed:',String(error?.message||error));
+          }
+        }
+      }
       return Response.json({status:'saved'});
     }
     if(route==='/profile' && request.method==='POST') {
@@ -162,7 +189,8 @@ export class Group22Publisher {
       const knownFingerprint=previous?.fingerprint ||
         scheduleFingerprintFromText(payload.date,previous?.text);
       // Only the signed owner command can acknowledge a missing Telegram post.
-      // Match the exact pending attempt and verified schedule before one retry.
+      // Match the exact pending attempt, but allow the newest verified timetable:
+      // DTEK may revise hours while the earlier Telegram send is uncertain.
       // Cron and /sync22 never carry this recovery acknowledgment.
       const recovery=payload.recovery;
       const recovering=recovery?.confirmedMissing===true;
@@ -171,16 +199,18 @@ export class Group22Publisher {
         const startedMs=Date.parse(startedAt);
         if(!recovering || !previous?.pending ||
           previous.pending.startedAt!==startedAt ||
-          previous.pending.fingerprint!==fingerprint ||
           !Number.isFinite(startedMs) ||
           Date.now()-startedMs<60_000) {
           return Response.json({status:'recovery-refused',
-            reason:'Pending attempt changed, is too recent, or schedule differs'});
+            reason:'Pending attempt changed or is too recent'});
         }
       }
-      if((previous?.pending || previous?.status==='pending')&&!recovering) {
-        // Delivery was uncertain. Only a date-specific, owner-confirmed
-        // recovery can bypass this protection; no automated duplicates.
+      if(!recovering &&
+        (previous?.pending?.fingerprint===fingerprint ||
+          (!previous?.pending && previous?.status==='pending'))) {
+        // Never blindly replay an uncertain send of the SAME timetable.
+        // A DIFFERENT confirmed version must still reach the channel:
+        // otherwise a single timeout can block the whole date forever.
         return Response.json({status:'pending',reason:'delivery outcome unknown'});
       }
       // When a manual forward outruns the cached public DTEK snapshot,
@@ -578,7 +608,7 @@ export async function handleTelegramWebhook(request,env,{now=new Date(),scope='p
         '. Telegram підтвердив повідомлення №'+outcome.messageId+'.');
     } else {
       const explanations={
-        'recovery-refused':'Стан або години змінилися, повтор заблоковано.',
+        'recovery-refused':'Спробу відправки вже змінено або ще не минула хвилина. Повтори /recover22 для перевірки.',
         pending:'Telegram знову не підтвердив відправку; автоматичний повтор заблоковано.',
         unchanged:'Цей графік уже збережений як опублікований.',
         error:'Не вдалося підтвердити доставку. Перевір логи та канал.'
